@@ -1,3 +1,5 @@
+import type { ChallengeRecipeId, SessionPhase, TeamStanding } from './session'
+
 export type TeamId = 'GOLD' | 'RED' | 'CYAN' | 'VIOLET' | 'EMERALD' | 'MAGENTA'
 
 // Material profile for the current round's sphere rendering
@@ -6,20 +8,27 @@ export type MaterialProfile = 'POLISHED' | 'METALLIC' | 'PEARL' | 'ENERGY'
 // Round phases — deterministic ordering
 export type Phase =
   | 'PREPARE'
-  | 'OPENING'       // 45-60s: contestants move, viewers identify teams
-  | 'DANGER'        // 45-60s: first elimination mechanics
-  | 'ESCALATION'    // 45-75s: increasing pressure
-  | 'FINAL'         // up to 45s: maximum pressure
+  | 'INTRO'           // 3-5s: round intro screen
+  | 'OPENING'         // 45-60s: contestants move, viewers identify teams
+  | 'DANGER'          // 45-60s: first elimination mechanics
+  | 'ESCALATION'      // 45-75s: increasing pressure
+  | 'FINAL'           // up to 45s: maximum pressure
   | 'WINNER'
+  | 'LEADERBOARD'     // show session standings after some rounds
   | 'RESET'
 
 // Active Circle Survival event type
 export type EventType =
   | 'NONE'
-  | 'DANGER_ARC'     // rotating lethal arc on boundary
-  | 'SAFE_SECTORS'   // clearly marked safe/danger sectors
-  | 'CENTER_REPULSOR'// central force pushing outward
-  | 'PULSE'          // radial physics impulse + visual ring
+  | 'DANGER_ARC'       // rotating lethal arc on boundary
+  | 'SAFE_SECTORS'     // clearly marked safe/danger sectors
+  | 'CENTER_REPULSOR'  // central force pushing outward
+  | 'PULSE'            // radial physics impulse + visual ring
+  | 'GRAVITY_PULL'     // constant inward pull toward center
+  | 'GRAVITY_PUSH'     // constant outward push from center
+
+// Gravity core mode for GRAVITY_CORE recipe
+export type GravityCoreMode = 'PULL' | 'PUSH' | 'NEUTRAL'
 
 // Trail point for each contestant — fixed-size ring buffer
 export interface TrailPoint {
@@ -78,6 +87,47 @@ export interface EventCountdown {
   ticksRemaining: number
 }
 
+// ─── Scoreboard row (per-team, session-persistent) ────────────────────────────
+
+export interface ScoreboardRow {
+  team: TeamId
+  aliveCount: number    // alive in current round
+  sessionPoints: number
+  roundWins: number
+  isEliminated: boolean // fully out this round
+}
+
+// ─── Round intro state ────────────────────────────────────────────────────────
+
+export interface RoundIntroState {
+  active: boolean
+  recipeName: string
+  recipeShortName: string
+  roundNumber: number
+  isChampionship: boolean
+  qualifier: number
+  positionInQualifier: number
+  ticksRemaining: number
+  maxTicks: number
+}
+
+// ─── Leaderboard display state ────────────────────────────────────────────────
+
+export interface LeaderboardState {
+  active: boolean
+  rows: TeamStanding[]
+  ticksRemaining: number
+  maxTicks: number
+}
+
+// ─── Championship win state ───────────────────────────────────────────────────
+
+export interface ChampionshipWinState {
+  active: boolean
+  team: TeamId
+  pointsGained: number
+}
+
 export interface SimState {
   tick: number
   phase: Phase
@@ -105,9 +155,10 @@ export interface SimState {
 
   // Pulse event
   pulseRings: PulseRing[]
+  // Scheduled pulse countdown (PULSE_PANIC recipe)
+  nextPulseCountdown: number  // ticks until next pulse (shown to viewer)
 
   // Safe sectors (deterministic list of safe arc ranges [start, end] radians)
-  // When populated, being near boundary OUTSIDE a safe sector is dangerous
   safeSectors: Array<[number, number]>
   safeSectorsActive: boolean
 
@@ -143,6 +194,43 @@ export interface SimState {
   roundDurationSec: number
   survivorCount: number
   eliminationCount: number
+
+  // ─── Pass 2: Session / Tournament state ──────────────────────────────────
+
+  // Current challenge recipe
+  currentRecipeId: ChallengeRecipeId
+  currentRecipeName: string
+  isChampionshipRound: boolean
+  sessionPhase: SessionPhase
+  pointMultiplier: number
+
+  // Gravity core state (GRAVITY_CORE recipe)
+  gravityCoreMode: GravityCoreMode
+  gravityCoreNextChangeIn: number   // ticks until next mode switch (display)
+  gravityCoreStrength: number
+
+  // Team elimination announcements
+  teamEliminatedLabel: string
+  teamEliminatedTicksRemaining: number
+
+  // Session scoreboard rows (persistent across rounds, updated at round end)
+  scoreboardRows: ScoreboardRow[]
+
+  // Team finish order for current round (for point awarding)
+  roundFinishOrder: TeamId[]
+
+  // Round intro
+  roundIntro: RoundIntroState
+
+  // Leaderboard moment
+  leaderboard: LeaderboardState
+
+  // Championship win display
+  championshipWin: ChampionshipWinState
+
+  // Qualifier / block info
+  currentQualifier: number
+  currentPositionInQualifier: number
 }
 
 export interface HealthResponse {

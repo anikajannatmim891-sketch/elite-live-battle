@@ -240,3 +240,88 @@ vite.config.ts               — multi-page build + /live /control dev rewrite
 **Known limitations:**
 - Interior detail (guide rings, radial lines) is redrawn every frame — acceptable cost (~14 draw calls); could be cached in a future pass if profiling shows it matters
 - Arena ring cache stores only the most recent radius; if boundary radius oscillates rapidly (not expected) it could rebake frequently — no issue with current smooth-shrink behavior
+
+---
+
+## Pass 2 — Retention + Unique Daily Session Foundation (complete)
+
+**Completed:**
+
+### SessionDNA (`src/client/shared/session.ts`)
+- `SessionDNA` type: sessionId, sessionSeed, materialSequence, challengeSequence, teamOrder, eventIntensityCurve, specialRoundSchedule, championshipInterval, arenaVisualTheme, ruleModifierSequence, roundPlans, earlyMidBoundary, midLateBoundary
+- `generateSessionDNA(seed)` — deterministic 60-round plan from seed; same seed reproduces identical session
+- `generateUniqueSessionDNA(seed)` — rejects sessions too similar to recent history (up to 12 retry attempts)
+- Session IDs in format `S-XXXXXXXX` (8 chars, deterministic from seed)
+- Session history: up to 14 fingerprints stored in `localStorage` as `elite_session_history`
+- `sessionSimilarity()` — structural 5-factor score; 0.75 threshold for rejection
+- `fingerPrintSession()` — compact structural fingerprint (no timestamp dependency for similarity)
+
+### Challenge Recipe System (6 recipes)
+All implemented in `SimEngine` with recipe-specific physics, event patterns, and timing:
+- **CLASSIC_SURVIVAL** — balanced standard with arc/repulsor/pulse events
+- **LAST_COLOR_STANDING** — team-survival win condition; winner = last team with any contestant alive
+- **DANGER_ARC_GAUNTLET** — always-arc events, faster speed, wider span, optional second arc at opposite side
+- **PULSE_PANIC** — scheduled pulse waves with visible countdown (`PULSE IN N`); intensity increases by phase
+- **GRAVITY_CORE** — deterministic PULL/PUSH/NEUTRAL mode switching with visible countdown and directional arrows at center
+- **SUDDEN_DEATH** — shorter phase durations, faster arcs, faster shrink rate; used sparingly (5-20% of rounds by phase)
+
+### Mini Tournament Structure
+- Qualifier blocks: N normal rounds followed by CHAMPIONSHIP ROUND
+- `championshipInterval`: 8-12 rounds (deterministic from SessionDNA seed)
+- 4+ championship rounds planned per 60-round session
+- Points: 1st=6, 2nd=4, 3rd=3, 4th=2, 5th=1, 6th=0 (configurable via `POSITION_POINTS`)
+- Championship multiplier: ×2 points
+- SUDDEN_DEATH multiplier: ×1.5 points
+
+### Session Progression
+- Three phases: `EARLY` (rounds 1–~20%), `MID` (~20–70%), `LATE` (~70–end)
+- Boundaries deterministic per session: earlyMidBoundary 30–40% of 60 rounds, midLateBoundary 65–75%
+- SUDDEN_DEATH frequency increases with session phase (5-10% EARLY → 12-20% LATE)
+- Event intensity curve stored per round
+
+### Persistent Team Standings
+- `ScoreboardRow` on `SimState` — persists session points and round wins across all rounds
+- Alive contestant dots decrease; eliminated teams show `OUT` (row stays, dims, never removed)
+- `onRoundEnd` callback triggers point awarding via `TournamentState`
+- Points synced back into `scoreboardRows` for scoreboard display
+
+### Round Intro Overlay (3-5s)
+- Shows: ROUND N / challenge name (large) / qualifier info / team list / session phase
+- Championship rounds: gold color, `CHAMPIONSHIP ROUND` header
+- Fade in/hold/fade out animation using tick fraction
+
+### Session Standings (Leaderboard) Moment
+- Displayed after every 5th round as `LEADERBOARD` phase (5s normal / 2s test)
+- Sorted by session points descending; shows team name, points, wins
+- Fades in/out cleanly
+
+### Championship Winner Presentation
+- Extended winner banner: `CHAMPIONSHIP` label, team name as `CHAMPION`, `+N POINTS`, duration/survivors
+- Gold color scheme during championship winner display
+
+### Team Eliminated Announcement
+- `TEAM ELIMINATED` shown for 3s when a team's last contestant dies
+- Separate from milestone announcements
+
+### Session Controls (/control)
+- Session ID and Seed displayed (selectable for copy)
+- `GENERATE NEW SESSION` button — posts `newSession` to BroadcastChannel, /live creates new DNA
+- Session standings panel updated live via BroadcastChannel
+- Material override preserved from Pass 1C
+
+### Performance
+- No new runtime allocations; all new state pre-allocated in constructor
+- Leaderboard rows array updated in-place
+- SessionDNA generates once and is indexed by round number
+- History bounded at 14 entries
+- Build: 56.00 kB / gzip 15.27 kB (was 35.57 kB / 9.71 kB)
+- Typecheck: clean
+- 76/76 verification assertions pass
+
+**Known limitations:**
+- `LAST_COLOR_STANDING` only checks individual survivors for team-win; if many team members die simultaneously in a single tick the announcement may lag one tick (negligible)
+- GRAVITY_CORE visual arrows don't match the physics direction perfectly when speed is high (cosmetic)
+- Session history requires localStorage; silently ignored if unavailable (production FFmpeg context)
+- Leaderboard in test mode shows for 2s — may flash quickly; acceptable for test verification
+- `showLeaderboard()` method on SimEngine kept for potential external use but not called from main.ts
+

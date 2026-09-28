@@ -1,9 +1,11 @@
 import { mulberry32, rngRange, type Rng } from './prng'
 import { reflectCircleBoundary, resolveCircleCircle } from './physics'
 import type {
-  CollisionEffect, Contestant, EliminationEffect, EventType, MaterialProfile,
-  Phase, PulseRing, SimState, TeamId, TrailPoint
+  CollisionEffect, Contestant, EliminationEffect, EventType,
+  GravityCoreMode, MaterialProfile, Phase, PulseRing,
+  SimState, TeamId, TrailPoint
 } from './types'
+import type { ChallengeRecipeId, RoundPlan, TeamStanding } from './session'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -12,84 +14,100 @@ const CONTESTANTS_PER_TEAM = 6
 const TOTAL = TEAMS.length * CONTESTANTS_PER_TEAM   // 36
 
 const FULL_BOUNDARY = 460
-const CONTESTANT_RADIUS = 16      // slightly larger for visibility
+const CONTESTANT_RADIUS = 16
 const CONTESTANT_MASS   = 1
 const INIT_SPEED  = 3.5
 const MIN_SPEED   = 1.8
 const MAX_SPEED   = 8
-const WANDER_AMP  = 0.06          // radians of random direction change per tick
+const WANDER_AMP  = 0.06
 
-const TRAIL_MAX = 12              // trail points per contestant
+const TRAIL_MAX = 12
 
-const EFFECT_POOL_SIZE    = 40      // max simultaneous elimination bursts
-const PULSE_POOL_SIZE     = 6       // max simultaneous pulse rings
-const COLLISION_POOL_SIZE = 24      // max simultaneous collision contact rings
+const EFFECT_POOL_SIZE    = 40
+const PULSE_POOL_SIZE     = 6
+const COLLISION_POOL_SIZE = 24
 
 const MIN_BOUNDARY = 70
 
 // ─── Phase timing (ticks at 60 TPS) ──────────────────────────────────────────
-// Normal mode target: 2m30s – 4m00s total
-//   PREPARE   5s     = 300
-//   OPENING   52s    = 3120
-//   DANGER    52s    = 3120
-//   ESCALATION 60s   = 3600
-//   FINAL     up to 45s = 2700  (forced resolution)
-//   WINNER    7s     = 420
-//   RESET     4s     = 240
-//
-// Test mode target: 25-35s total
-//   PREPARE   1s  = 60
-//   OPENING   7s  = 420
-//   DANGER    7s  = 420
-//   ESCALATION 10s = 600
-//   FINAL     up to 10s = 600
-//   WINNER    2s  = 120
-//   RESET     1s  = 60
 
 const T = {
-  PREPARE_N:    300, PREPARE_T:     60,
-  OPENING_N:   3120, OPENING_T:    420,
-  DANGER_N:    3120, DANGER_T:     420,
-  ESCALATION_N:3600, ESCALATION_T: 600,
-  FINAL_N:     2700, FINAL_T:      600,
-  WINNER_N:     420, WINNER_T:     120,
-  RESET_N:      240, RESET_T:       60,
+  // Intro (before OPENING)
+  INTRO_N:      240, INTRO_T:       60,   // 4s normal / 1s test
+
+  PREPARE_N:    300, PREPARE_T:      60,
+  OPENING_N:   3120, OPENING_T:     420,
+  DANGER_N:    3120, DANGER_T:      420,
+  ESCALATION_N:3600, ESCALATION_T:  600,
+  FINAL_N:     2700, FINAL_T:       600,
+  WINNER_N:     420, WINNER_T:      120,
+  LEADERBOARD_N: 300, LEADERBOARD_T: 120, // 5s normal / 2s test
+  RESET_N:      240, RESET_T:        60,
 }
 
-// Shrink rates (boundary units per tick)
-const SHRINK_ESCALATION_N = 0.30    // gentle at first
-const SHRINK_ESCALATION_T = 0.9     // test: moderate — still 8s+ to force action
-const SHRINK_FINAL_N      = 0.65    // faster in final
-const SHRINK_FINAL_T      = 2.5     // test: faster in final
+// Shorter for SUDDEN_DEATH recipe
+const T_SUDDEN = {
+  OPENING_N:   1200, OPENING_T:     180,
+  DANGER_N:    1200, DANGER_T:      180,
+  ESCALATION_N:1800, ESCALATION_T:  300,
+  FINAL_N:     1200, FINAL_T:       300,
+}
 
-// How often events fire (ticks between events) during DANGER/ESCALATION
-const EVENT_INTERVAL_N = 900   // ~15s
-const EVENT_INTERVAL_T = 90    //  ~1.5s
+// Shrink rates
+const SHRINK_ESCALATION_N = 0.30
+const SHRINK_ESCALATION_T = 0.9
+const SHRINK_FINAL_N      = 0.65
+const SHRINK_FINAL_T      = 2.5
+// SUDDEN_DEATH: faster shrink
+const SHRINK_ESCALATION_SUDDEN_N = 0.55
+const SHRINK_FINAL_SUDDEN_N      = 1.20
 
-// Danger arc settings
-const DANGER_ARC_SPAN_N  = 0.8   // half-span radians (~92°)
+// Event intervals
+const EVENT_INTERVAL_N = 900
+const EVENT_INTERVAL_T = 90
+
+// Danger arc
+const DANGER_ARC_SPAN_N  = 0.8
 const DANGER_ARC_SPAN_T  = 1.0
 const DANGER_ARC_SPEED_N = 0.012
 const DANGER_ARC_SPEED_T = 0.04
-const DANGER_ARC_DURATION_N = 1800  // 30s
+const DANGER_ARC_DURATION_N = 1800
 const DANGER_ARC_DURATION_T = 180
 
-// Repulsor settings
+// Gauntlet arc (stronger version for DANGER_ARC_GAUNTLET)
+const GAUNTLET_ARC_SPAN_N  = 1.2
+const GAUNTLET_ARC_SPEED_N = 0.022
+const GAUNTLET_ARC_DURATION_N = 2400
+
+// Repulsor
 const REPULSOR_STRENGTH_N = 0.12
 const REPULSOR_STRENGTH_T = 0.20
 const REPULSOR_DURATION_N = 1800
 const REPULSOR_DURATION_T = 150
 
-// Pulse settings
+// Pulse
 const PULSE_STRENGTH_N = 2.2
 const PULSE_STRENGTH_T = 2.8
-const PULSE_DURATION_N = 600   // 10s — includes ring decay
+const PULSE_DURATION_N = 600
 const PULSE_DURATION_T = 90
 
-// Milestone thresholds
-const MILESTONE_DURATION = 180  // 3s display
+// Pulse Panic: scheduled pulses
+const PULSE_PANIC_INTERVAL_N = 600   // 10s between pulses
+const PULSE_PANIC_INTERVAL_T = 90
+const PULSE_PANIC_STRENGTH_EARLY_N = 1.6
+// Late-phase pulses are generated by addding phaseIdx multiplier inline
 
-// ─── Material profiles ordered for round cycling ─────────────────────────────
+// Gravity Core
+const GRAVITY_PULL_STRENGTH_N  = 0.09
+const GRAVITY_PUSH_STRENGTH_N  = 0.10
+const GRAVITY_CORE_DURATION_N  = 1800   // 30s per mode
+const GRAVITY_CORE_DURATION_T  = 150
+
+// Milestone
+const MILESTONE_DURATION = 180
+const TEAM_ELIM_DURATION = 180
+
+// ─── Material profiles ────────────────────────────────────────────────────────
 
 const MATERIAL_CYCLE: MaterialProfile[] = ['POLISHED', 'METALLIC', 'PEARL', 'ENERGY']
 
@@ -109,7 +127,7 @@ export interface SimConfig {
 export class SimEngine {
   private rng: Rng
   private seed: number
-  private testMode: boolean
+  readonly testMode: boolean
   private pool: Contestant[]
   private effectPool: EliminationEffect[]
   private pulsePool: PulseRing[]
@@ -118,27 +136,77 @@ export class SimEngine {
   // Next-event scheduling
   private nextEventTick: number = 0
 
+  // Current recipe id
+  private currentRecipeId: ChallengeRecipeId = 'CLASSIC_SURVIVAL'
+  // True during championship round
+  private isChampionship = false
+  private pointMultiplier = 1
+
+  // Gravity core
+  private gravityCoreModeTick = 0  // when to switch mode next
+
+  // Pulse Panic scheduling
+  private nextPulsePanicTick = 0
+
+  // DANGER_ARC_GAUNTLET: tracks which arc pattern we're on
+  private gauntletPattern = 0
+
+  // Last round the leaderboard was shown
+  private lastLeaderboardRound = 0
+
+  // Round plans from SessionDNA (optional)
+  private roundPlans: RoundPlan[] = []
+
+  // Tournament standings (session-persistent)
+  private standings: TeamStanding[] = []
+
+  // Accumulated finish orders for point awarding
+  // roundFinishOrder built during WINNER phase
+  private finishOrderInProgress: TeamId[] = []
+
   readonly state: SimState
 
-  // Allow control panel to override material (null = AUTO)
+  // Callback when a round finishes (for tournament director to award points)
+  onRoundEnd: ((finishOrder: TeamId[], isChampionship: boolean, multiplier: number) => void) | null = null
+
+  // Allow control panel to override material
   setMaterialOverride(m: MaterialProfile | null): void {
     this.state.materialOverride = m
-    // Apply immediately to current round
     this.state.roundMaterial = materialForRound(this.state.round, m)
+  }
+
+  // Called by director to inject round plans and standings
+  setRoundPlans(plans: RoundPlan[]): void {
+    this.roundPlans = plans
+  }
+
+  setStandings(standings: TeamStanding[]): void {
+    this.standings = standings
+    this.syncScoreboardRows()
+  }
+
+  // Inject leaderboard display
+  showLeaderboard(rows: TeamStanding[]): void {
+    const s = this.state
+    s.leaderboard.active = true
+    s.leaderboard.rows = [...rows]
+    s.leaderboard.ticksRemaining = this.t(T.LEADERBOARD_T, T.LEADERBOARD_N)
+    s.leaderboard.maxTicks = s.leaderboard.ticksRemaining
+    this.lastLeaderboardRound = s.round
   }
 
   constructor(initialSeed: number, config: SimConfig) {
     this.seed     = initialSeed >>> 0
     this.testMode = config.testMode
 
-    // Pre-allocate contestant pool with trail buffers
+    // Pre-allocate contestant pool
     this.pool = []
     for (let i = 0; i < TOTAL; i++) {
       const trail: TrailPoint[] = []
       for (let t = 0; t < TRAIL_MAX; t++) trail.push({ x: 0, y: 0 })
       this.pool.push({
         id: i,
-        team: TEAMS[Math.floor(i / CONTESTANTS_PER_TEAM)],
+        team: TEAMS[Math.floor(i / CONTESTANTS_PER_TEAM)]!,
         x: 0, y: 0, vx: 0, vy: 0,
         radius: CONTESTANT_RADIUS,
         mass: CONTESTANT_MASS,
@@ -163,6 +231,9 @@ export class SimEngine {
       this.collisionPool.push({ active: false, x: 0, y: 0, age: 0, maxAge: 0 })
     }
 
+    // Pre-allocate standings
+    this.standings = TEAMS.map(team => ({ team, sessionPoints: 0, roundWins: 0 }))
+
     this.rng = mulberry32(this.seed)
     this.state = {
       tick: 0,
@@ -182,6 +253,7 @@ export class SimEngine {
       repulsorActive: false,
       repulsorStrength: 0,
       pulseRings: this.pulsePool,
+      nextPulseCountdown: 0,
       safeSectors: [],
       safeSectorsActive: false,
       pressureActive: false,
@@ -201,6 +273,54 @@ export class SimEngine {
       roundDurationSec: 0,
       survivorCount: 0,
       eliminationCount: 0,
+
+      // Pass 2
+      currentRecipeId: 'CLASSIC_SURVIVAL',
+      currentRecipeName: 'CLASSIC SURVIVAL',
+      isChampionshipRound: false,
+      sessionPhase: 'EARLY',
+      pointMultiplier: 1,
+
+      gravityCoreMode: 'NEUTRAL',
+      gravityCoreNextChangeIn: 0,
+      gravityCoreStrength: 0,
+
+      teamEliminatedLabel: '',
+      teamEliminatedTicksRemaining: 0,
+
+      scoreboardRows: TEAMS.map(team => ({
+        team, aliveCount: CONTESTANTS_PER_TEAM, sessionPoints: 0, roundWins: 0, isEliminated: false
+      })),
+
+      roundFinishOrder: [],
+
+      roundIntro: {
+        active: false,
+        recipeName: 'CLASSIC SURVIVAL',
+        recipeShortName: 'CLASSIC',
+        roundNumber: 1,
+        isChampionship: false,
+        qualifier: 1,
+        positionInQualifier: 1,
+        ticksRemaining: 0,
+        maxTicks: 0,
+      },
+
+      leaderboard: {
+        active: false,
+        rows: [],
+        ticksRemaining: 0,
+        maxTicks: 0,
+      },
+
+      championshipWin: {
+        active: false,
+        team: 'GOLD',
+        pointsGained: 0,
+      },
+
+      currentQualifier: 1,
+      currentPositionInQualifier: 0,
     }
 
     this.beginRound()
@@ -210,48 +330,49 @@ export class SimEngine {
 
   private t<T>(normal: T, test: T): T { return this.testMode ? test : normal }
 
+  // Get plan for current round (0-indexed by round number-1)
+  private currentPlan(): RoundPlan | null {
+    const idx = this.state.round - 1
+    return (idx >= 0 && idx < this.roundPlans.length) ? this.roundPlans[idx]! : null
+  }
+
   private spawnEffect(x: number, y: number, team: TeamId): void {
     for (let i = 0; i < this.effectPool.length; i++) {
-      const e = this.effectPool[i]
+      const e = this.effectPool[i]!
       if (!e.active) {
         e.active = true; e.x = x; e.y = y; e.team = team
-        e.age = 0; e.maxAge = this.t(22, 18)   // < 0.4s at 60 tps
+        e.age = 0; e.maxAge = this.t(22, 18)
         return
       }
     }
-    // pool full — reuse oldest
-    let oldest = this.effectPool[0]
+    let oldest = this.effectPool[0]!
     for (let i = 1; i < this.effectPool.length; i++) {
-      if ((this.effectPool[i]?.age ?? 0) > (oldest?.age ?? 0)) oldest = this.effectPool[i]!
+      if (this.effectPool[i]!.age > oldest.age) oldest = this.effectPool[i]!
     }
-    if (oldest) {
-      oldest.active = true; oldest.x = x; oldest.y = y; oldest.team = team
-      oldest.age = 0; oldest.maxAge = this.t(22, 18)
-    }
+    oldest.active = true; oldest.x = x; oldest.y = y; oldest.team = team
+    oldest.age = 0; oldest.maxAge = this.t(22, 18)
   }
 
   private spawnCollisionEffect(x: number, y: number): void {
     for (let i = 0; i < this.collisionPool.length; i++) {
-      const e = this.collisionPool[i]
+      const e = this.collisionPool[i]!
       if (!e.active) {
         e.active = true; e.x = x; e.y = y
-        e.age = 0; e.maxAge = this.t(14, 10)   // ~0.23s at 60 TPS
+        e.age = 0; e.maxAge = this.t(14, 10)
         return
       }
     }
-    // pool full — reuse oldest
-    let oldest = this.collisionPool[0]
+    let oldest = this.collisionPool[0]!
     for (let i = 1; i < this.collisionPool.length; i++) {
-      if ((this.collisionPool[i]?.age ?? 0) > (oldest?.age ?? 0)) oldest = this.collisionPool[i]!
+      if (this.collisionPool[i]!.age > oldest.age) oldest = this.collisionPool[i]!
     }
-    if (oldest) {
-      oldest.active = true; oldest.x = x; oldest.y = y
-      oldest.age = 0; oldest.maxAge = this.t(14, 10)
-    }
+    oldest.active = true; oldest.x = x; oldest.y = y
+    oldest.age = 0; oldest.maxAge = this.t(14, 10)
   }
 
-  private spawnPulseRing(x: number, y: number, color: string): void {    for (let i = 0; i < this.pulsePool.length; i++) {
-      const p = this.pulsePool[i]
+  private spawnPulseRing(x: number, y: number, color: string): void {
+    for (let i = 0; i < this.pulsePool.length; i++) {
+      const p = this.pulsePool[i]!
       if (!p.active) {
         p.active = true; p.x = x; p.y = y; p.color = color
         p.age = 0; p.maxAge = this.t(45, 35)
@@ -260,16 +381,42 @@ export class SimEngine {
     }
   }
 
+  private syncScoreboardRows(): void {
+    // Sync session points/wins from standings into scoreboardRows
+    for (const row of this.state.scoreboardRows) {
+      const s = this.standings.find(x => x.team === row.team)
+      if (s) {
+        row.sessionPoints = s.sessionPoints
+        row.roundWins = s.roundWins
+      }
+    }
+  }
+
   // ─── Round lifecycle ──────────────────────────────────────────────────────
 
-  private beginRound(): void {
-    this.state.round++
+  beginRound(): void {
+    const s = this.state
+    s.round++
     this.seed = (Math.imul(this.seed, 1664525) + 1013904223) >>> 0
     this.rng = mulberry32(this.seed)
 
-    // Place contestants spread within inner 70% of boundary
+    // Determine recipe from plan or fallback to CLASSIC_SURVIVAL
+    const plan = this.currentPlan()
+    this.currentRecipeId = plan ? plan.recipe.id : 'CLASSIC_SURVIVAL'
+    this.isChampionship = plan ? plan.recipe.isChampionship : false
+    this.pointMultiplier = plan ? plan.recipe.pointMultiplier : 1
+
+    s.currentRecipeId = this.currentRecipeId
+    s.currentRecipeName = plan ? plan.recipe.name : 'CLASSIC SURVIVAL'
+    s.isChampionshipRound = this.isChampionship
+    s.sessionPhase = plan ? plan.sessionPhase : 'EARLY'
+    s.pointMultiplier = this.pointMultiplier
+    s.currentQualifier = plan ? plan.qualifier : 1
+    s.currentPositionInQualifier = plan ? plan.positionInQualifier : s.round
+
+    // Place contestants
     for (let i = 0; i < TOTAL; i++) {
-      const c = this.pool[i]
+      const c = this.pool[i]!
       c.alive = true
       const angle = rngRange(this.rng, 0, Math.PI * 2)
       const r     = rngRange(this.rng, 0.15, 0.68) * FULL_BOUNDARY
@@ -281,48 +428,98 @@ export class SimEngine {
       c.trailHead = 0; c.trailLen = 0
     }
 
-    // Reset effects
-    for (let i = 0; i < this.effectPool.length; i++)    this.effectPool[i].active    = false
-    for (let i = 0; i < this.pulsePool.length; i++)     this.pulsePool[i].active     = false
-    for (let i = 0; i < this.collisionPool.length; i++) this.collisionPool[i].active = false
+    // Reset effect pools
+    for (let i = 0; i < this.effectPool.length; i++)    this.effectPool[i]!.active    = false
+    for (let i = 0; i < this.pulsePool.length; i++)     this.pulsePool[i]!.active     = false
+    for (let i = 0; i < this.collisionPool.length; i++) this.collisionPool[i]!.active = false
 
-    this.state.tick = 0
-    this.state.roundTick = 0
-    this.state.phase = 'PREPARE'
-    this.state.boundaryRadius     = FULL_BOUNDARY
-    this.state.fullBoundaryRadius = FULL_BOUNDARY
-    this.state.winnerTeam         = null
-    this.state.phaseTicksRemaining = this.t(T.PREPARE_T, T.PREPARE_N)
+    s.tick = 0
+    s.roundTick = 0
+    s.boundaryRadius     = FULL_BOUNDARY
+    s.fullBoundaryRadius = FULL_BOUNDARY
+    s.winnerTeam         = null
+    s.roundFinishOrder   = []
+    this.finishOrderInProgress = []
 
-    this.state.activeEvent        = 'NONE'
-    this.state.eventTicksRemaining = 0
-    this.state.dangerArcLethal    = false
-    this.state.repulsorActive     = false
-    this.state.repulsorStrength   = 0
-    this.state.safeSectors        = []
-    this.state.safeSectorsActive  = false
-    this.state.pressureActive     = false
-    this.state.shrinkRate         = 0
+    s.activeEvent        = 'NONE'
+    s.eventTicksRemaining = 0
+    s.dangerArcLethal    = false
+    s.repulsorActive     = false
+    s.repulsorStrength   = 0
+    s.safeSectors        = []
+    s.safeSectorsActive  = false
+    s.pressureActive     = false
+    s.shrinkRate         = 0
+    s.nextPulseCountdown = 0
 
-    // Select material for this round (deterministic, respects override)
-    this.state.roundMaterial = materialForRound(this.state.round, this.state.materialOverride)
+    s.gravityCoreMode       = 'NEUTRAL'
+    s.gravityCoreNextChangeIn = 0
+    s.gravityCoreStrength   = 0
+    this.gravityCoreModeTick = 0
+    this.gauntletPattern    = 0
+    this.nextPulsePanicTick = 0
 
-    this.state.shownFinal10 = false
-    this.state.shownFinal5  = false
-    this.state.shownFinalTwo = false
-    this.state.milestoneLabel = ''
-    this.state.milestoneTicksRemaining = 0
+    s.roundMaterial = plan
+      ? plan.materialProfile
+      : materialForRound(s.round, s.materialOverride)
+    // Respect manual override
+    if (s.materialOverride !== null) s.roundMaterial = s.materialOverride
 
-    this.state.roundDurationSec = 0
-    this.state.survivorCount = 0
-    this.state.eliminationCount = 0
+    s.shownFinal10 = false
+    s.shownFinal5  = false
+    s.shownFinalTwo = false
+    s.milestoneLabel = ''
+    s.milestoneTicksRemaining = 0
+    s.teamEliminatedLabel = ''
+    s.teamEliminatedTicksRemaining = 0
 
-    // Schedule first event for DANGER phase
+    s.roundDurationSec = 0
+    s.survivorCount = 0
+    s.eliminationCount = 0
+
+    // Reset scoreboard alive counts
+    for (const row of s.scoreboardRows) {
+      row.aliveCount = CONTESTANTS_PER_TEAM
+      row.isEliminated = false
+    }
+    this.syncScoreboardRows()
+
+    s.championshipWin.active = false
+
+    // Schedule first event
     this.nextEventTick = 0
+
+    // Show intro
+    s.roundIntro = {
+      active: true,
+      recipeName: s.currentRecipeName,
+      recipeShortName: plan ? plan.recipe.shortName : 'CLASSIC',
+      roundNumber: s.round,
+      isChampionship: this.isChampionship,
+      qualifier: s.currentQualifier,
+      positionInQualifier: s.currentPositionInQualifier,
+      ticksRemaining: this.t(T.INTRO_T, T.INTRO_N),
+      maxTicks: this.t(T.INTRO_T, T.INTRO_N),
+    }
+    s.phase = 'INTRO'
+    s.phaseTicksRemaining = s.roundIntro.ticksRemaining
+
     this.updateNextEventHint()
   }
 
   private updateNextEventHint(): void {
+    const recipe = this.currentRecipeId
+    // PULSE_PANIC: uses nextPulseCountdown instead
+    if (recipe === 'PULSE_PANIC') {
+      if (this.nextPulsePanicTick > 0) {
+        const ticks = this.nextPulsePanicTick - this.state.roundTick
+        this.state.nextPulseCountdown = Math.max(0, ticks)
+      }
+      this.state.nextEventLabel = ''
+      this.state.nextEventTicksRemaining = 0
+      return
+    }
+
     const ticks = this.nextEventTick - this.state.roundTick
     if (ticks <= 0 || this.state.activeEvent !== 'NONE') {
       this.state.nextEventLabel = ''
@@ -330,7 +527,6 @@ export class SimEngine {
       return
     }
     const sec = Math.ceil(ticks / 60)
-    // Pick a label based on what might come next
     const labels = ['DANGER ARC IN', 'REPULSOR IN', 'PULSE IN', 'EVENT IN']
     const li = Math.floor(this.state.round % labels.length)
     this.state.nextEventLabel = (labels[li] ?? 'EVENT IN') + ' ' + sec
@@ -344,10 +540,30 @@ export class SimEngine {
     this.state.roundTick++
     this.state.phaseTicksRemaining--
 
-    // Age effects
     this.ageEffects()
 
     const phase = this.state.phase
+
+    if (phase === 'INTRO') {
+      // Contestants placed but immobile during intro — just age
+      if (this.state.phaseTicksRemaining <= 0) {
+        this.state.roundIntro.active = false
+        this.enterPhase('PREPARE')
+      }
+      return
+    }
+
+    if (phase === 'LEADERBOARD') {
+      if (this.state.leaderboard.ticksRemaining > 0) {
+        this.state.leaderboard.ticksRemaining--
+      }
+      if (this.state.phaseTicksRemaining <= 0) {
+        this.state.leaderboard.active = false
+        this.state.phase = 'RESET'
+        this.state.phaseTicksRemaining = this.t(T.RESET_T, T.RESET_N)
+      }
+      return
+    }
 
     if (phase === 'PREPARE') {
       this.integrate()
@@ -357,6 +573,10 @@ export class SimEngine {
       }
 
     } else if (phase === 'OPENING') {
+      // GRAVITY_CORE: activate core from opening
+      if (this.currentRecipeId === 'GRAVITY_CORE') {
+        this.tickGravityCore()
+      }
       this.integrate()
       this.collide(false)
       this.checkMilestones()
@@ -366,11 +586,14 @@ export class SimEngine {
 
     } else if (phase === 'DANGER') {
       this.tickEvent()
+      if (this.currentRecipeId === 'GRAVITY_CORE') this.tickGravityCore()
       this.integrate()
       this.applyRepulsor()
       this.applyDangerArc()
+      this.applyGravityCore()
       this.collide(false)
       this.checkMilestones()
+      this.checkTeamEliminations()
       if (this.state.phaseTicksRemaining <= 0) {
         this.endEvent()
         this.enterPhase('ESCALATION')
@@ -378,9 +601,12 @@ export class SimEngine {
 
     } else if (phase === 'ESCALATION') {
       this.tickEvent()
-      // Start gentle boundary shrink
+      if (this.currentRecipeId === 'GRAVITY_CORE') this.tickGravityCore()
+      // Shrink
       this.state.pressureActive = true
-      this.state.shrinkRate = this.t(SHRINK_ESCALATION_T, SHRINK_ESCALATION_N)
+      const isSudden = this.currentRecipeId === 'SUDDEN_DEATH'
+      this.state.shrinkRate = this.t(SHRINK_ESCALATION_T,
+        isSudden ? SHRINK_ESCALATION_SUDDEN_N : SHRINK_ESCALATION_N)
       this.state.boundaryRadius = Math.max(
         MIN_BOUNDARY + 80,
         this.state.boundaryRadius - this.state.shrinkRate
@@ -388,9 +614,11 @@ export class SimEngine {
       this.integrate()
       this.applyRepulsor()
       this.applyDangerArc()
+      this.applyGravityCore()
       this.eliminateOutside()
       this.collide(true)
       this.checkMilestones()
+      this.checkTeamEliminations()
 
       const winner = this.findWinner()
       if (winner !== null) {
@@ -402,8 +630,10 @@ export class SimEngine {
 
     } else if (phase === 'FINAL') {
       this.tickEvent()
-      // Faster shrink, boundary goes to minimum
-      this.state.shrinkRate = this.t(SHRINK_FINAL_T, SHRINK_FINAL_N)
+      if (this.currentRecipeId === 'GRAVITY_CORE') this.tickGravityCore()
+      const isSudden = this.currentRecipeId === 'SUDDEN_DEATH'
+      this.state.shrinkRate = this.t(SHRINK_FINAL_T,
+        isSudden ? SHRINK_FINAL_SUDDEN_N : SHRINK_FINAL_N)
       this.state.boundaryRadius = Math.max(
         MIN_BOUNDARY,
         this.state.boundaryRadius - this.state.shrinkRate
@@ -411,9 +641,11 @@ export class SimEngine {
       this.integrate()
       this.applyRepulsor()
       this.applyDangerArc()
+      this.applyGravityCore()
       this.eliminateOutside()
       this.collide(true)
       this.checkMilestones()
+      this.checkTeamEliminations()
 
       const winner = this.findWinner()
       if (winner !== null) {
@@ -426,11 +658,26 @@ export class SimEngine {
       }
 
     } else if (phase === 'WINNER') {
-      // Survivors keep moving slowly
       this.integrateWinner()
       if (this.state.phaseTicksRemaining <= 0) {
-        this.state.phase = 'RESET'
-        this.state.phaseTicksRemaining = this.t(T.RESET_T, T.RESET_N)
+        // Fire round end callback
+        if (this.onRoundEnd && this.state.winnerTeam !== null) {
+          this.onRoundEnd(this.finishOrderInProgress, this.isChampionship, this.pointMultiplier)
+        }
+        // Decide if leaderboard should show
+        const roundsSinceLB = this.state.round - this.lastLeaderboardRound
+        const showLB = roundsSinceLB >= 5
+        if (showLB) {
+          this.state.phase = 'LEADERBOARD'
+          this.state.phaseTicksRemaining = this.t(T.LEADERBOARD_T, T.LEADERBOARD_N)
+          this.state.leaderboard.active = true
+          this.state.leaderboard.ticksRemaining = this.state.phaseTicksRemaining
+          this.state.leaderboard.maxTicks = this.state.phaseTicksRemaining
+          this.lastLeaderboardRound = this.state.round
+        } else {
+          this.state.phase = 'RESET'
+          this.state.phaseTicksRemaining = this.t(T.RESET_T, T.RESET_N)
+        }
       }
 
     } else if (phase === 'RESET') {
@@ -439,11 +686,18 @@ export class SimEngine {
       }
     }
 
-    // Milestone display decay
+    // Milestone decay
     if (this.state.milestoneTicksRemaining > 0) {
       this.state.milestoneTicksRemaining--
     } else {
       this.state.milestoneLabel = ''
+    }
+
+    // Team eliminated label decay
+    if (this.state.teamEliminatedTicksRemaining > 0) {
+      this.state.teamEliminatedTicksRemaining--
+    } else {
+      this.state.teamEliminatedLabel = ''
     }
   }
 
@@ -451,26 +705,77 @@ export class SimEngine {
 
   private enterPhase(phase: Phase): void {
     this.state.phase = phase
+    const recipe = this.currentRecipeId
+
     switch (phase) {
-      case 'OPENING':
-        this.state.phaseTicksRemaining = this.t(T.OPENING_T, T.OPENING_N)
-        // Schedule first event for DANGER phase — hint only
-        this.nextEventTick = this.state.roundTick +
-          this.t(T.OPENING_T, T.OPENING_N) +
-          this.t(EVENT_INTERVAL_T, EVENT_INTERVAL_N) / 2
+      case 'PREPARE':
+        this.state.phaseTicksRemaining = this.t(T.PREPARE_T, T.PREPARE_N)
         break
-      case 'DANGER':
-        this.state.phaseTicksRemaining = this.t(T.DANGER_T, T.DANGER_N)
+
+      case 'OPENING': {
+        let opDur: number
+        if (recipe === 'SUDDEN_DEATH') {
+          opDur = this.t(T_SUDDEN.OPENING_T, T_SUDDEN.OPENING_N)
+        } else {
+          opDur = this.t(T.OPENING_T, T.OPENING_N)
+        }
+        this.state.phaseTicksRemaining = opDur
+        this.nextEventTick = this.state.roundTick + opDur + this.t(EVENT_INTERVAL_T, EVENT_INTERVAL_N) / 2
+        // PULSE_PANIC: schedule first pulse from OPENING
+        if (recipe === 'PULSE_PANIC') {
+          this.nextPulsePanicTick = this.state.roundTick + this.t(PULSE_PANIC_INTERVAL_T, PULSE_PANIC_INTERVAL_N)
+        }
+        // GRAVITY_CORE: set initial mode
+        if (recipe === 'GRAVITY_CORE') {
+          this.setNextGravityCoreMode()
+        }
+        break
+      }
+
+      case 'DANGER': {
+        let dDur: number
+        if (recipe === 'SUDDEN_DEATH') {
+          dDur = this.t(T_SUDDEN.DANGER_T, T_SUDDEN.DANGER_N)
+        } else {
+          dDur = this.t(T.DANGER_T, T.DANGER_N)
+        }
+        this.state.phaseTicksRemaining = dDur
         this.nextEventTick = this.state.roundTick + this.t(60, 300)
+        // GAUNTLET: fire first arc immediately in DANGER
+        if (recipe === 'DANGER_ARC_GAUNTLET') {
+          this.nextEventTick = this.state.roundTick + this.t(30, 120)
+        }
+        // PULSE_PANIC: schedule from DANGER
+        if (recipe === 'PULSE_PANIC') {
+          this.nextPulsePanicTick = this.state.roundTick + this.t(PULSE_PANIC_INTERVAL_T / 2, PULSE_PANIC_INTERVAL_N / 2)
+        }
         break
-      case 'ESCALATION':
-        this.state.phaseTicksRemaining = this.t(T.ESCALATION_T, T.ESCALATION_N)
+      }
+
+      case 'ESCALATION': {
+        let eDur: number
+        if (recipe === 'SUDDEN_DEATH') {
+          eDur = this.t(T_SUDDEN.ESCALATION_T, T_SUDDEN.ESCALATION_N)
+        } else {
+          eDur = this.t(T.ESCALATION_T, T.ESCALATION_N)
+        }
+        this.state.phaseTicksRemaining = eDur
         this.nextEventTick = this.state.roundTick + this.t(45, 240)
         break
-      case 'FINAL':
-        this.state.phaseTicksRemaining = this.t(T.FINAL_T, T.FINAL_N)
+      }
+
+      case 'FINAL': {
+        let fDur: number
+        if (recipe === 'SUDDEN_DEATH') {
+          fDur = this.t(T_SUDDEN.FINAL_T, T_SUDDEN.FINAL_N)
+        } else {
+          fDur = this.t(T.FINAL_T, T.FINAL_N)
+        }
+        this.state.phaseTicksRemaining = fDur
         this.nextEventTick = this.state.roundTick + this.t(30, 180)
         break
+      }
+
       default:
         break
     }
@@ -482,17 +787,30 @@ export class SimEngine {
   private tickEvent(): void {
     const rt = this.state.roundTick
     const phase = this.state.phase
+    const recipe = this.currentRecipeId
 
-    // Advance danger arc position each tick while active
+    // PULSE_PANIC: scheduled pulses take priority
+    if (recipe === 'PULSE_PANIC') {
+      this.tickPulsePanic(phase)
+      return
+    }
+
+    // Advance danger arc
     if (this.state.activeEvent === 'DANGER_ARC') {
       this.state.dangerArcAngle += this.state.dangerArcSpeed
       this.state.eventTicksRemaining--
       if (this.state.eventTicksRemaining <= 0) {
         this.endEvent()
+        // GAUNTLET: immediately schedule next arc
+        if (recipe === 'DANGER_ARC_GAUNTLET') {
+          this.gauntletPattern++
+          this.nextEventTick = rt + this.t(30, 90)
+        }
       } else {
-        // Lethal after first 20 ticks
-        this.state.dangerArcLethal = this.state.eventTicksRemaining <
-          (this.t(DANGER_ARC_DURATION_T, DANGER_ARC_DURATION_N) - 20)
+        const duration = recipe === 'DANGER_ARC_GAUNTLET'
+          ? this.t(DANGER_ARC_DURATION_T, GAUNTLET_ARC_DURATION_N)
+          : this.t(DANGER_ARC_DURATION_T, DANGER_ARC_DURATION_N)
+        this.state.dangerArcLethal = this.state.eventTicksRemaining < (duration - 20)
       }
       this.updateNextEventHint()
       return
@@ -500,23 +818,19 @@ export class SimEngine {
 
     if (this.state.activeEvent === 'CENTER_REPULSOR') {
       this.state.eventTicksRemaining--
-      if (this.state.eventTicksRemaining <= 0) {
-        this.endEvent()
-      }
+      if (this.state.eventTicksRemaining <= 0) this.endEvent()
       this.updateNextEventHint()
       return
     }
 
     if (this.state.activeEvent === 'PULSE') {
       this.state.eventTicksRemaining--
-      if (this.state.eventTicksRemaining <= 0) {
-        this.endEvent()
-      }
+      if (this.state.eventTicksRemaining <= 0) this.endEvent()
       this.updateNextEventHint()
       return
     }
 
-    // Check if it's time to fire the next event
+    // Fire next event
     if (
       (phase === 'DANGER' || phase === 'ESCALATION' || phase === 'FINAL') &&
       this.state.activeEvent === 'NONE' &&
@@ -524,59 +838,105 @@ export class SimEngine {
     ) {
       this.fireNextEvent()
     }
-
     this.updateNextEventHint()
   }
 
+  private tickPulsePanic(phase: string): void {
+    if (phase !== 'DANGER' && phase !== 'ESCALATION' && phase !== 'FINAL') return
+    const rt = this.state.roundTick
+
+    // Update countdown display
+    const countdown = this.nextPulsePanicTick - rt
+    this.state.nextPulseCountdown = Math.max(0, countdown)
+
+    if (rt >= this.nextPulsePanicTick && this.nextPulsePanicTick > 0) {
+      // Determine pulse strength: increases over time
+      const phaseIdx = phase === 'DANGER' ? 0 : phase === 'ESCALATION' ? 1 : 2
+      const strength = this.t(
+        PULSE_PANIC_STRENGTH_EARLY_N + (phaseIdx * 0.5) + (this.rng() * 0.4),
+        PULSE_STRENGTH_T
+      )
+      this.firePulseWithStrength(strength)
+      // Schedule next: interval gets shorter each phase
+      const interval = this.t(
+        Math.max(60, PULSE_PANIC_INTERVAL_T - phaseIdx * 15),
+        Math.max(540, PULSE_PANIC_INTERVAL_N - phaseIdx * 120)
+      )
+      this.nextPulsePanicTick = rt + interval + Math.floor(this.rng() * (interval * 0.3))
+    }
+  }
+
   private fireNextEvent(): void {
-    // Deterministically pick next event based on round and tick
-    const pick = Math.floor(this.rng() * 3)
-    const events: EventType[] = ['DANGER_ARC', 'CENTER_REPULSOR', 'PULSE']
-    const chosen: EventType = events[pick % events.length] ?? 'PULSE'
+    const recipe = this.currentRecipeId
+
+    let chosen: EventType
+
+    if (recipe === 'DANGER_ARC_GAUNTLET') {
+      // Always fire danger arc
+      chosen = 'DANGER_ARC'
+    } else if (recipe === 'CLASSIC_SURVIVAL' || recipe === 'LAST_COLOR_STANDING') {
+      const pick = Math.floor(this.rng() * 3)
+      const events: EventType[] = ['DANGER_ARC', 'CENTER_REPULSOR', 'PULSE']
+      chosen = events[pick % events.length] ?? 'PULSE'
+    } else if (recipe === 'SUDDEN_DEATH') {
+      // Faster danger arc only
+      chosen = 'DANGER_ARC'
+    } else {
+      const pick = Math.floor(this.rng() * 3)
+      const events: EventType[] = ['DANGER_ARC', 'CENTER_REPULSOR', 'PULSE']
+      chosen = events[pick % events.length] ?? 'PULSE'
+    }
 
     this.state.activeEvent = chosen
 
     switch (chosen) {
-      case 'DANGER_ARC':
+      case 'DANGER_ARC': {
+        const isGauntlet = recipe === 'DANGER_ARC_GAUNTLET'
+        const isSudden   = recipe === 'SUDDEN_DEATH'
         this.state.dangerArcAngle = rngRange(this.rng, 0, Math.PI * 2)
+        // Gauntlet: add second arc offset by PI
+        const speedMult = isGauntlet ? 1.8 : isSudden ? 1.5 : 1.0
         this.state.dangerArcSpeed = rngRange(this.rng, 0.5, 1.5) *
           (this.rng() > 0.5 ? 1 : -1) *
-          this.t(DANGER_ARC_SPEED_T, DANGER_ARC_SPEED_N)
-        this.state.dangerArcSpan  = this.t(DANGER_ARC_SPAN_T, DANGER_ARC_SPAN_N)
+          this.t(DANGER_ARC_SPEED_T, isGauntlet ? GAUNTLET_ARC_SPEED_N : DANGER_ARC_SPEED_N) * speedMult
+        this.state.dangerArcSpan  = this.t(DANGER_ARC_SPAN_T, isGauntlet ? GAUNTLET_ARC_SPAN_N : DANGER_ARC_SPAN_N)
         this.state.dangerArcLethal = false
-        this.state.eventTicksRemaining = this.t(DANGER_ARC_DURATION_T, DANGER_ARC_DURATION_N)
+        this.state.eventTicksRemaining = this.t(DANGER_ARC_DURATION_T,
+          isGauntlet ? GAUNTLET_ARC_DURATION_N : DANGER_ARC_DURATION_N)
         break
+      }
       case 'CENTER_REPULSOR':
         this.state.repulsorActive   = true
         this.state.repulsorStrength = this.t(REPULSOR_STRENGTH_T, REPULSOR_STRENGTH_N)
         this.state.eventTicksRemaining = this.t(REPULSOR_DURATION_T, REPULSOR_DURATION_N)
         break
       case 'PULSE':
-        this.firePulse()
+        this.firePulseWithStrength(this.t(PULSE_STRENGTH_T, PULSE_STRENGTH_N))
         this.state.eventTicksRemaining = this.t(PULSE_DURATION_T, PULSE_DURATION_N)
         break
     }
 
     // Schedule next event
-    this.nextEventTick = this.state.roundTick +
-      this.t(EVENT_INTERVAL_T, EVENT_INTERVAL_N)
+    const recipe2 = this.currentRecipeId
+    const interval = recipe2 === 'DANGER_ARC_GAUNTLET'
+      ? this.t(30, 600)     // gauntlet: tight sequence
+      : recipe2 === 'SUDDEN_DEATH'
+      ? this.t(45, 450)     // sudden death: faster
+      : this.t(EVENT_INTERVAL_T, EVENT_INTERVAL_N)
+    this.nextEventTick = this.state.roundTick + interval
   }
 
-  private firePulse(): void {
-    // Radial impulse from center outward
-    const strength = this.t(PULSE_STRENGTH_T, PULSE_STRENGTH_N)
+  private firePulseWithStrength(strength: number): void {
     for (let i = 0; i < TOTAL; i++) {
-      const c = this.pool[i]
+      const c = this.pool[i]!
       if (!c.alive) continue
       const d = Math.sqrt(c.x * c.x + c.y * c.y)
       if (d < 1) continue
       const nx = c.x / d
       const ny = c.y / d
-      // Impulse magnitude inversely proportional to distance
       const imp = strength * Math.max(0.3, 1 - d / FULL_BOUNDARY)
       c.vx += nx * imp
       c.vy += ny * imp
-      // Clamp speed
       const spd = Math.sqrt(c.vx * c.vx + c.vy * c.vy)
       if (spd > MAX_SPEED) { c.vx *= MAX_SPEED / spd; c.vy *= MAX_SPEED / spd }
     }
@@ -591,20 +951,63 @@ export class SimEngine {
     this.state.repulsorStrength  = 0
   }
 
+  // ─── Gravity Core ─────────────────────────────────────────────────────────
+
+  private setNextGravityCoreMode(): void {
+    const modes: GravityCoreMode[] = ['PULL', 'PUSH', 'NEUTRAL', 'PULL', 'PUSH']
+    const pick = Math.floor(this.rng() * modes.length)
+    this.state.gravityCoreMode = modes[pick] ?? 'NEUTRAL'
+    const dur = this.t(GRAVITY_CORE_DURATION_T, GRAVITY_CORE_DURATION_N)
+    this.gravityCoreModeTick = this.state.roundTick + dur
+    this.state.gravityCoreNextChangeIn = dur
+    const mode = this.state.gravityCoreMode
+    this.state.gravityCoreStrength = mode === 'NEUTRAL' ? 0
+      : mode === 'PULL' ? GRAVITY_PULL_STRENGTH_N
+      : GRAVITY_PUSH_STRENGTH_N
+  }
+
+  private tickGravityCore(): void {
+    const rt = this.state.roundTick
+    this.state.gravityCoreNextChangeIn = Math.max(0, this.gravityCoreModeTick - rt)
+    if (rt >= this.gravityCoreModeTick && this.gravityCoreModeTick > 0) {
+      this.setNextGravityCoreMode()
+    }
+  }
+
+  private applyGravityCore(): void {
+    if (this.currentRecipeId !== 'GRAVITY_CORE') return
+    const mode = this.state.gravityCoreMode
+    if (mode === 'NEUTRAL') return
+
+    const str = this.state.gravityCoreStrength
+    const sign = mode === 'PULL' ? -1 : 1   // PULL: toward center (negative radial)
+
+    for (let i = 0; i < TOTAL; i++) {
+      const c = this.pool[i]!
+      if (!c.alive) continue
+      const d = Math.sqrt(c.x * c.x + c.y * c.y)
+      if (d < 1) continue
+      const nx = c.x / d
+      const ny = c.y / d
+      c.vx += sign * nx * str
+      c.vy += sign * ny * str
+      const spd = Math.sqrt(c.vx * c.vx + c.vy * c.vy)
+      if (spd > MAX_SPEED) { c.vx *= MAX_SPEED / spd; c.vy *= MAX_SPEED / spd }
+    }
+  }
+
   // ─── Physics helpers ─────────────────────────────────────────────────────
 
   private integrate(): void {
     for (let i = 0; i < TOTAL; i++) {
-      const c = this.pool[i]
+      const c = this.pool[i]!
       if (!c.alive) continue
 
-      // Record trail point
-      c.trail[c.trailHead].x = c.x
-      c.trail[c.trailHead].y = c.y
+      c.trail[c.trailHead]!.x = c.x
+      c.trail[c.trailHead]!.y = c.y
       c.trailHead = (c.trailHead + 1) % TRAIL_MAX
       if (c.trailLen < TRAIL_MAX) c.trailLen++
 
-      // Wander
       const speed = Math.sqrt(c.vx * c.vx + c.vy * c.vy)
       const curAngle = Math.atan2(c.vy, c.vx)
       const newAngle = curAngle + rngRange(this.rng, -WANDER_AMP, WANDER_AMP)
@@ -617,16 +1020,14 @@ export class SimEngine {
     }
   }
 
-  // Slow movement during winner phase — survivors drift
   private integrateWinner(): void {
     for (let i = 0; i < TOTAL; i++) {
-      const c = this.pool[i]
+      const c = this.pool[i]!
       if (!c.alive) continue
       c.vx *= 0.96
       c.vy *= 0.96
       c.x += c.vx
       c.y += c.vy
-      // Keep inside boundary
       reflectCircleBoundary(c, this.state.boundaryRadius)
     }
   }
@@ -635,13 +1036,12 @@ export class SimEngine {
     if (!this.state.repulsorActive) return
     const str = this.state.repulsorStrength
     for (let i = 0; i < TOTAL; i++) {
-      const c = this.pool[i]
+      const c = this.pool[i]!
       if (!c.alive) continue
       const d = Math.sqrt(c.x * c.x + c.y * c.y)
       if (d < 1) continue
       const nx = c.x / d
       const ny = c.y / d
-      // Force proportional to how close to center
       const factor = Math.max(0, 1 - d / FULL_BOUNDARY) * str
       c.vx += nx * factor
       c.vy += ny * factor
@@ -659,17 +1059,34 @@ export class SimEngine {
     const halfSpan = this.state.dangerArcSpan
 
     for (let i = 0; i < TOTAL; i++) {
-      const c = this.pool[i]
+      const c = this.pool[i]!
       if (!c.alive) continue
       const d = Math.sqrt(c.x * c.x + c.y * c.y)
-      // Only check contestants near the boundary
       if (d < boundary - c.radius * 3) continue
       const angle = Math.atan2(c.y, c.x)
       const diff = angleDiff(angle, arcAngle)
       if (Math.abs(diff) < halfSpan) {
-        // In the danger zone at the boundary — eliminate
         c.alive = false
         this.spawnEffect(c.x, c.y, c.team)
+        this.state.eliminationCount++
+      }
+    }
+
+    // GAUNTLET: second arc at opposite side
+    if (this.currentRecipeId === 'DANGER_ARC_GAUNTLET' && this.gauntletPattern % 2 === 1) {
+      const arcAngle2 = arcAngle + Math.PI
+      for (let i = 0; i < TOTAL; i++) {
+        const c = this.pool[i]!
+        if (!c.alive) continue
+        const d = Math.sqrt(c.x * c.x + c.y * c.y)
+        if (d < boundary - c.radius * 3) continue
+        const angle = Math.atan2(c.y, c.x)
+        const diff = angleDiff(angle, arcAngle2)
+        if (Math.abs(diff) < halfSpan) {
+          c.alive = false
+          this.spawnEffect(c.x, c.y, c.team)
+          this.state.eliminationCount++
+        }
       }
     }
   }
@@ -678,22 +1095,19 @@ export class SimEngine {
     const boundary = this.state.boundaryRadius
     if (!escalation) {
       for (let i = 0; i < TOTAL; i++) {
-        if (this.pool[i].alive) reflectCircleBoundary(this.pool[i], boundary)
+        if (this.pool[i]!.alive) reflectCircleBoundary(this.pool[i]!, boundary)
       }
     }
 
-    // Minimum relative speed (units/tick) to register a collision effect
-    // Avoids spawning effects on gentle touches / resting contacts
     const COLLISION_THRESHOLD = 2.5
 
     for (let i = 0; i < TOTAL - 1; i++) {
-      if (!this.pool[i].alive) continue
+      if (!this.pool[i]!.alive) continue
       for (let j = i + 1; j < TOTAL; j++) {
-        if (!this.pool[j].alive) continue
+        if (!this.pool[j]!.alive) continue
         const a = this.pool[i]!
         const b = this.pool[j]!
 
-        // Check for meaningful impact before resolution
         const dx = b.x - a.x
         const dy = b.y - a.y
         const distSq = dx * dx + dy * dy
@@ -703,7 +1117,6 @@ export class SimEngine {
           const nx = dx / dist
           const ny = dy / dist
           const relVDotN = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny
-          // relVDotN > 0 means approaching; spawn effect if strong enough
           if (relVDotN > COLLISION_THRESHOLD) {
             const cx = (a.x + b.x) * 0.5
             const cy = (a.y + b.y) * 0.5
@@ -719,23 +1132,101 @@ export class SimEngine {
   private eliminateOutside(): void {
     const boundary = this.state.boundaryRadius
     for (let i = 0; i < TOTAL; i++) {
-      const c = this.pool[i]
+      const c = this.pool[i]!
       if (!c.alive) continue
       const d = Math.sqrt(c.x * c.x + c.y * c.y)
       if (d > boundary - c.radius) {
         c.alive = false
         this.spawnEffect(c.x, c.y, c.team)
+        this.state.eliminationCount++
       }
     }
   }
 
-  // ─── Milestone / winner logic ────────────────────────────────────────────
+  // ─── LAST_COLOR_STANDING winner logic ────────────────────────────────────
+
+  private findWinner(): TeamId | null {
+    if (this.currentRecipeId === 'LAST_COLOR_STANDING') {
+      return this.findLastColorStandingWinner()
+    }
+    // Default: last individual standing
+    let found: TeamId | null = null
+    for (let i = 0; i < TOTAL; i++) {
+      if (!this.pool[i]!.alive) continue
+      const t = this.pool[i]!.team
+      if (found === null) { found = t }
+      else if (found !== t) return null
+    }
+    return found
+  }
+
+  private findLastColorStandingWinner(): TeamId | null {
+    // A team is "alive" if any of its members is alive
+    const teamsAlive = new Set<TeamId>()
+    for (let i = 0; i < TOTAL; i++) {
+      if (this.pool[i]!.alive) teamsAlive.add(this.pool[i]!.team)
+    }
+    if (teamsAlive.size === 1) {
+      return [...teamsAlive][0]!
+    }
+    return null
+  }
+
+  // ─── Team elimination checking ────────────────────────────────────────────
+
+  private checkTeamEliminations(): void {
+    // Track teams that just became fully eliminated this tick
+    for (const team of TEAMS) {
+      const row = this.state.scoreboardRows.find(r => r.team === team)
+      if (!row || row.isEliminated) continue
+
+      let alive = 0
+      for (let i = 0; i < TOTAL; i++) {
+        if (this.pool[i]!.team === team && this.pool[i]!.alive) alive++
+      }
+      row.aliveCount = alive
+
+      if (alive === 0) {
+        row.isEliminated = true
+        // Track finish order
+        if (!this.finishOrderInProgress.includes(team)) {
+          // Insert at front of "lost teams" (we'll reverse at end)
+          this.finishOrderInProgress.unshift(team)
+        }
+        // Show team eliminated announcement
+        this.state.teamEliminatedLabel = `${team} ELIMINATED`
+        this.state.teamEliminatedTicksRemaining = TEAM_ELIM_DURATION
+      }
+    }
+
+    // Also update alive counts for living teams
+    for (const row of this.state.scoreboardRows) {
+      if (row.isEliminated) continue
+      let alive = 0
+      for (let i = 0; i < TOTAL; i++) {
+        if (this.pool[i]!.team === row.team && this.pool[i]!.alive) alive++
+      }
+      row.aliveCount = alive
+    }
+
+    // Check for "FINAL TWO TEAMS"
+    const teamsAlive = new Set<TeamId>()
+    for (let i = 0; i < TOTAL; i++) {
+      if (this.pool[i]!.alive) teamsAlive.add(this.pool[i]!.team)
+    }
+    if (teamsAlive.size === 2 && !this.state.shownFinalTwo) {
+      this.state.shownFinalTwo = true
+      this.state.milestoneLabel = 'FINAL TWO TEAMS'
+      this.state.milestoneTicksRemaining = MILESTONE_DURATION
+    }
+  }
+
+  // ─── Milestone checking ───────────────────────────────────────────────────
 
   private checkMilestones(): void {
     let alive = 0
-    const teamsAlive = new Set<TeamId>()
     for (let i = 0; i < TOTAL; i++) {
-      if (this.pool[i].alive) { alive++; teamsAlive.add(this.pool[i].team) }
+      if (this.pool[i]!.alive) alive++
     }
 
     if (!this.state.shownFinal10 && alive <= 10) {
@@ -746,11 +1237,6 @@ export class SimEngine {
     if (!this.state.shownFinal5 && alive <= 5) {
       this.state.shownFinal5 = true
       this.state.milestoneLabel = 'FINAL 5'
-      this.state.milestoneTicksRemaining = MILESTONE_DURATION
-    }
-    if (!this.state.shownFinalTwo && teamsAlive.size <= 2) {
-      this.state.shownFinalTwo = true
-      this.state.milestoneLabel = 'FINAL TWO TEAMS'
       this.state.milestoneTicksRemaining = MILESTONE_DURATION
     }
   }
@@ -764,62 +1250,84 @@ export class SimEngine {
     // Compute stats
     this.state.roundDurationSec = Math.floor(this.state.roundTick / 60)
     let survivors = 0
-    for (let i = 0; i < TOTAL; i++) if (this.pool[i].alive) survivors++
+    for (let i = 0; i < TOTAL; i++) if (this.pool[i]!.alive) survivors++
     this.state.survivorCount    = survivors
     this.state.eliminationCount = TOTAL - survivors
-  }
 
-  private findWinner(): TeamId | null {
-    let found: TeamId | null = null
-    for (let i = 0; i < TOTAL; i++) {
-      if (!this.pool[i].alive) continue
-      const t = this.pool[i].team
-      if (found === null) { found = t }
-      else if (found !== t) return null
+    // Complete the finish order: winner is first, then already-eliminated teams reverse
+    // finishOrderInProgress was built front-to-back as teams eliminated (last = most recent)
+    // So finishOrderInProgress[0] = first team to die, last = most recent before winner
+    // We need: [winner, last eliminated, ..., first eliminated]
+    const finishOrder: TeamId[] = [team]
+    // Remaining eliminated teams (not the winner) in reverse order of elimination
+    // (finishOrderInProgress is ordered first-to-die at front)
+    for (let k = this.finishOrderInProgress.length - 1; k >= 0; k--) {
+      const t2 = this.finishOrderInProgress[k]!
+      if (t2 !== team) finishOrder.push(t2)
     }
-    return found
+    // Add any teams that didn't die (shouldn't happen normally but safety)
+    for (const t2 of TEAMS) {
+      if (!finishOrder.includes(t2)) finishOrder.push(t2)
+    }
+    this.finishOrderInProgress = finishOrder
+    this.state.roundFinishOrder = finishOrder
+
+    // Championship win display
+    if (this.isChampionship) {
+      this.state.championshipWin.active = true
+      this.state.championshipWin.team = team
+      // Points = 1st place base × multiplier
+      this.state.championshipWin.pointsGained = Math.round(6 * this.pointMultiplier)
+    }
   }
 
   private majorityTeam(): TeamId {
-    const counts = [0, 0, 0, 0, 0, 0]
+    const counts = new Array<number>(TEAMS.length).fill(0)
     for (let i = 0; i < TOTAL; i++) {
-      if (this.pool[i].alive) {
-        const ti = TEAMS.indexOf(this.pool[i].team)
-        if (ti >= 0) counts[ti]++
+      if (this.pool[i]!.alive) {
+        const ti = TEAMS.indexOf(this.pool[i]!.team)
+        if (ti >= 0) counts[ti]!++
       }
     }
     let best = 0
     for (let k = 1; k < TEAMS.length; k++) {
-      if ((counts[k] ?? 0) > (counts[best] ?? 0)) best = k
+      if (counts[k]! > counts[best]!) best = k
     }
     return TEAMS[best]!
   }
 
   private ageEffects(): void {
     for (let i = 0; i < this.effectPool.length; i++) {
-      const e = this.effectPool[i]
+      const e = this.effectPool[i]!
       if (!e.active) continue
       e.age++
       if (e.age >= e.maxAge) e.active = false
     }
     for (let i = 0; i < this.pulsePool.length; i++) {
-      const p = this.pulsePool[i]
+      const p = this.pulsePool[i]!
       if (!p.active) continue
       p.age++
       if (p.age >= p.maxAge) p.active = false
     }
     for (let i = 0; i < this.collisionPool.length; i++) {
-      const e = this.collisionPool[i]
+      const e = this.collisionPool[i]!
       if (!e.active) continue
       e.age++
       if (e.age >= e.maxAge) e.active = false
+    }
+    // Leaderboard tick
+    if (this.state.leaderboard.active && this.state.leaderboard.ticksRemaining > 0) {
+      // ticked in main step() LEADERBOARD branch
+    }
+    // Intro tick
+    if (this.state.roundIntro.active && this.state.roundIntro.ticksRemaining > 0) {
+      this.state.roundIntro.ticksRemaining--
     }
   }
 }
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
-// Returns signed angle difference in [-PI, PI]
 function angleDiff(a: number, b: number): number {
   let d = a - b
   while (d >  Math.PI) d -= Math.PI * 2

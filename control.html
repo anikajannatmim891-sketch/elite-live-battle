@@ -22,15 +22,60 @@
     .mat-btn:hover { border-color: #666; color: #ddd; }
     .mat-btn.active { border-color: #39ff14; color: #39ff14; }
     .note { font-size: 0.75rem; color: #444; margin-top: 8px; }
+    .session-field { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+    .session-field label { color: #777; font-size: 0.8rem; min-width: 80px; }
+    .session-value { color: #aaa; font-size: 0.85rem; background: #0a0a0a; border: 1px solid #222; padding: 3px 8px; min-width: 160px; user-select: all; }
+    .action-btn {
+      background: #1a1a1a; border: 1px solid #444; color: #ccc;
+      font-family: monospace; font-size: 0.85rem; padding: 8px 16px;
+      cursor: pointer; letter-spacing: 1px; transition: border-color 0.15s, color 0.15s;
+    }
+    .action-btn:hover { border-color: #39ff14; color: #39ff14; }
+    .action-btn.danger:hover { border-color: #ff4422; color: #ff4422; }
+    .standing-row { display: flex; gap: 16px; align-items: center; padding: 4px 0; border-bottom: 1px solid #1a1a1a; }
+    .standing-row .pos { color: #555; min-width: 20px; }
+    .standing-row .team { min-width: 80px; font-weight: bold; }
+    .standing-row .pts { color: #ccddee; min-width: 60px; text-align: right; }
+    .standing-row .wins { color: #778899; font-size: 0.8rem; }
+    .team.gold { color: #FFD700; }
+    .team.red { color: #FF2233; }
+    .team.cyan { color: #00FFEE; }
+    .team.violet { color: #CC00FF; }
+    .team.emerald { color: #00FF88; }
+    .team.magenta { color: #FF00AA; }
   </style>
 </head>
 <body>
   <h1>ELITE LIVE BATTLE ENGINE</h1>
-  <p class="sub">CONTROL PANEL — PASS 1C</p>
+  <p class="sub">CONTROL PANEL — PASS 2</p>
+
   <div class="section">
     <h2>Status</h2>
     <div id="status-output">initializing...</div>
   </div>
+
+  <div class="section">
+    <h2>Current Session</h2>
+    <div class="session-field">
+      <label>Session ID</label>
+      <span class="session-value" id="session-id">—</span>
+    </div>
+    <div class="session-field">
+      <label>Seed</label>
+      <span class="session-value" id="session-seed">—</span>
+    </div>
+    <div class="btn-row" style="margin-top: 12px;">
+      <button class="action-btn danger" id="btn-new-session">GENERATE NEW SESSION</button>
+      <button class="action-btn" id="btn-copy-seed">SHOW SEED (select to copy)</button>
+    </div>
+    <p class="note">NEW SESSION resets tournament standings and starts a new challenge sequence.</p>
+  </div>
+
+  <div class="section">
+    <h2>Session Standings</h2>
+    <div id="standings-output" style="font-size: 0.85rem; color: #888;">waiting for data...</div>
+  </div>
+
   <div class="section">
     <h2>Material Override</h2>
     <div class="btn-row">
@@ -42,6 +87,7 @@
     </div>
     <p class="note">AUTO = deterministic per-round cycle. Manual = development/testing only.</p>
   </div>
+
   <script type="module" src="/src/client/control/main.ts"></script>
 </body>
 </html>
