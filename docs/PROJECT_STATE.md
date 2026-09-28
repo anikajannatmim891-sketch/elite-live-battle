@@ -182,3 +182,61 @@ vite.config.ts               — multi-page build + /live /control dev rewrite
 - Offscreen sphere canvases are baked at first use; if radius changes mid-round the cache updates on next bucket boundary (no issue with current fixed radius=16)
 - Collision effect threshold (2.5 units/tick) may occasionally miss low-speed grazes — intentional
 - `BroadcastChannel` material override only works when /live and /control are open in the same browser (same origin); fine for development use
+
+---
+
+## Pass 1D — Premium Arena Ring and Event Visuals (complete)
+
+**Completed:**
+
+### Premium Arena Ring (`src/client/live/renderer.ts`)
+- Replaced flat single-stroke boundary ring with a multi-layer pseudo-3D ring structure
+- Ring baked into an offscreen `HTMLCanvasElement` cached by quantized `boundaryRadius` (rounds to nearest 2px)
+  - Cache invalidates automatically during arena shrink; typically holds for many frames at a time
+- Baked ring layers (10 layers):
+  1. Deep outer shadow halo — radial gradient diffuse drop-off beyond ring edge
+  2. Outer rim dark base — thick dark stroke forming the outer lip
+  3. Outer rim metallic gradient — two overlapping strokes (60/90% blue-steel tones)
+  4. Main ring band fill — radial gradient annular groove (dark recessed center)
+  5. Inner bevel / inner lip — two bright thin strokes on interior boundary
+  6. Outer edge bright crease — thin highlight line at outer wall
+  7. Specular highlight arc — subtle bright arc (upper-left ~225°→345°) simulating overhead light
+  8. Opposite rim shadow arc — dark arc (lower-right) reinforcing 3D lighting logic
+  9. Tick marks — 60 marks, long every 5th; long ticks span full ring band + dot accent; short ticks inside only
+  10. Inner groove rings — two faint rings just inside tick boundary
+
+### Internal Arena Detail
+- Radial gradient arena fill (subtle center-bright, edge-dark) replacing flat dark fill
+- Two faint concentric guide rings at 70% and 40% radius
+- 12 near-invisible radial guide lines from 15%→65% radius
+- Tiny center focal pip (double circle, low alpha)
+
+### Danger Arc Visual Integration
+- Sector fill now uses a radial gradient (hot at boundary, fades toward center)
+- Three-stroke ring integration: broad outer glow band + sharp inner crease + inner lip echo
+- Arc endpoint tip indicators (small filled dots at arc boundaries)
+- Lethal state adds extra bright crease stroke and brighter tip dots
+
+### Center Repulsor Device
+- Redesigned as a structured arena device: outer energy disc (radial gradient fill), two concentric device rings
+- Slowly rotating 4-arm cross geometry (arena device motif), 4 stationary diagonal accent ticks
+- Core bright dot with inner white pixel
+
+### Pulse Rings
+- Added secondary softer outer companion ring to each pulse (at 88% radius, 35% alpha)
+
+### Phase Ring Overlay
+- Phase-dependent color applied as live overlay on top of cached ring
+- Three-part overlay: broad base ring + bright inner crease + pressure glow (ESCALATION/FINAL only)
+- ESCALATION/FINAL: dual-sided glow (outside AND inside arena boundary)
+
+### Performance
+- Arena ring: single offscreen canvas, blitted each frame with `drawImage` — O(1) per frame when radius stable
+- Rebake triggered only on boundary radius change (quantized to 2px steps)
+- No bloom, no blur, no shadowBlur, no raster assets
+- Build: 35.57 kB / gzip 9.71 kB (was 30.05 kB / 8.59 kB)
+- Typecheck: clean
+
+**Known limitations:**
+- Interior detail (guide rings, radial lines) is redrawn every frame — acceptable cost (~14 draw calls); could be cached in a future pass if profiling shows it matters
+- Arena ring cache stores only the most recent radius; if boundary radius oscillates rapidly (not expected) it could rebake frequently — no issue with current smooth-shrink behavior
