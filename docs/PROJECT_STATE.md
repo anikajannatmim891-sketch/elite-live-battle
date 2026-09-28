@@ -322,6 +322,75 @@ All implemented in `SimEngine` with recipe-specific physics, event patterns, and
 - `LAST_COLOR_STANDING` only checks individual survivors for team-win; if many team members die simultaneously in a single tick the announcement may lag one tick (negligible)
 - GRAVITY_CORE visual arrows don't match the physics direction perfectly when speed is high (cosmetic)
 - Session history requires localStorage; silently ignored if unavailable (production FFmpeg context)
-- Leaderboard in test mode shows for 2s — may flash quickly; acceptable for test verification
-- `showLeaderboard()` method on SimEngine kept for potential external use but not called from main.ts
+## Pass 3 — True Arena Diversity (complete)
+
+**Completed:**
+
+### ArenaFamily System
+- New `ArenaFamily` type: `CIRCLE_SURVIVAL` | `ROTATING_GATES` | `HEX_PRESSURE` | `FUNNEL_DROP`
+- `SessionDNA` extended with `arenaSequence: ArenaFamily[]`
+- `RoundPlan` extended with `arenaFamily: ArenaFamily`
+- `SimState` extended with all arena-specific state (gate arms, hex sides, funnel geometry, deflectors)
+- `generateSessionDNA()` now generates a deterministic arena sequence per round
+- Arena selection rules: no 3+ consecutive same arena; championship rounds always CIRCLE_SURVIVAL
+
+### Reusable Collision Foundation (`src/client/shared/physics.ts`)
+- `reflectCircleSegment()` — circle vs finite line segment (gate arms, deflectors)
+- `reflectConvexPolygon()` — circle inside convex polygon (hex boundary)
+- `reflectFunnelWall()` — circle vs angled funnel wall
+
+### ROTATING_GATES Arena
+- Outer circular boundary with 3–6 rotating solid gate arms
+- Arms rotate deterministically at seeded speed/direction
+- 65% of arms have passable gap (position/size seeded per round)
+- Contestants physically collide with gate geometry via `reflectCircleSegment`
+- Phase escalation: boundary shrinks + arm colors shift hot-red
+- Visual: dark circular field, mechanical steel arms, green gap indicators, glowing hub
+
+### HEX_PRESSURE Arena
+- True hexagonal boundary — no circle underneath
+- `reflectConvexPolygon()` enforces six-sided walls
+- Sides progressively inset during ESCALATION/FINAL (asymmetric pattern)
+- Random danger sides activate temporarily (touching them eliminates contestants)
+- Slow decorative rotation of hex frame
+- Visual: large premium pseudo-3D hex frame, corner pip accents, inset pressure markers, phase pressure glow
+
+### FUNNEL_DROP Arena
+- Vertically-oriented chamber: wide upper section → angled funnel walls → narrow chute
+- Contestants experience constant downward gravity (increases in ESCALATION/FINAL)
+- 4 rotating deflector paddles inside funnel redirect contestants
+- Bottom chute becomes lethal in ESCALATION/FINAL phases (`funnelChuteDanger`)
+- Contestants spawn in upper chamber; outcomes driven by deflector positioning
+- Visual: vertical funnel shape, animated rotating deflectors, chute danger flash, tick marks on walls
+
+### Arena-Specific Simulation Dispatch
+- `tickArena()` per-tick physics dispatch (gravity, gate rotation, deflectors)
+- `applyArenaBoundary()` per-tick boundary enforcement dispatch
+- `initArena()` per-round initialization (geometry, spawn positions)
+- Circle boundary reflection in `collide()` skipped for HEX/FUNNEL arenas
+
+### Round Intro Updates
+- Arena family name shown prominently above challenge recipe name
+- Per-arena color coding: CIRCLE=blue, ROTATING_GATES=orange, HEX_PRESSURE=teal, FUNNEL_DROP=pink
+- HUD shows arena family name with color accent
+
+### Session Variation
+- All four arena families appear regularly in generated sequences
+- Different seeds produce meaningfully different arena sequences (verified)
+- Championship rounds always use CIRCLE_SURVIVAL (most proven arena)
+
+### Performance
+- All new state pre-allocated in constructor (gate arms pool, hex verts, deflectors)
+- `hexVerts` reused each tick — no allocation in hot loop
+- New collision functions are O(n) per contestant per tick, no allocations
+- Build: 75.39 kB / gzip 20.61 kB (was 56.00 kB / 15.27 kB)
+- Typecheck: clean
+
+**Known limitations:**
+- HEX_PRESSURE: sides inset symmetrically by rounding; true per-side independent inset would require more vertex math (current approach still visually distinct)
+- FUNNEL_DROP: funnel wall reflection normal calculation uses atan2 approximation; extreme slope angles could cause unusual bounces (uncommon with current geometry)
+- ROTATING_GATES: gap-less arms act as solid walls throughout; "danger gap" phase for gap-less arms not yet activated (arm collision already effective as eliminator during escalation)
+- Championship rounds always CIRCLE_SURVIVAL — 3-in-a-row of CIRCLE_SURVIVAL is possible if rounds N-1, N are CIRCLE and N+1 is championship (rare, acceptable)
+- `reflectConvexPolygon` expects CCW winding; hex vertices are generated CCW by `computeInsetHexVerts` in renderer and `updateHexVerts` in sim
+
 

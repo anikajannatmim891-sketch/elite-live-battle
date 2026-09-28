@@ -7,7 +7,7 @@
  */
 
 import { mulberry32, type Rng } from './prng'
-import type { MaterialProfile, TeamId } from './types'
+import type { MaterialProfile, TeamId, ArenaFamily } from './types'
 
 // ─── Challenge Recipe Types ───────────────────────────────────────────────────
 
@@ -54,6 +54,7 @@ export interface RoundPlan {
   isChampionship: boolean
   qualifier: number   // which qualifier block (1-based)
   positionInQualifier: number  // 1..N within that block
+  arenaFamily: ArenaFamily
 }
 
 // ─── Session DNA ──────────────────────────────────────────────────────────────
@@ -63,6 +64,7 @@ export interface SessionDNA {
   sessionSeed: number
   materialSequence: MaterialProfile[]
   challengeSequence: ChallengeRecipeId[]
+  arenaSequence: ArenaFamily[]
   teamOrder: TeamId[]
   eventIntensityCurve: number[]   // one value per round 0.0-1.0
   specialRoundSchedule: number[]  // round numbers that are championship
@@ -142,6 +144,25 @@ const NORMAL_RECIPE_POOL: ChallengeRecipeId[] = [
 
 // Materials for round cycling
 const MATERIAL_CYCLE: MaterialProfile[] = ['POLISHED', 'METALLIC', 'PEARL', 'ENERGY']
+
+// Arena families — all four must appear regularly
+const ARENA_POOL: ArenaFamily[] = ['CIRCLE_SURVIVAL', 'ROTATING_GATES', 'HEX_PRESSURE', 'FUNNEL_DROP']
+
+// Championship rounds always use CIRCLE_SURVIVAL (most proven)
+// Normal rounds rotate through all four, avoiding 3+ consecutive same arena
+function pickArena(
+  rng: Rng,
+  lastTwo: ArenaFamily[],
+  isChampionship: boolean
+): ArenaFamily {
+  if (isChampionship) return 'CIRCLE_SURVIVAL'
+  // Avoid 3 in a row of same arena
+  const forbidden = (lastTwo[0] === lastTwo[1]) ? lastTwo[0] : null
+  const pool = forbidden
+    ? ARENA_POOL.filter(a => a !== forbidden)
+    : ARENA_POOL
+  return pool[Math.floor(rng() * pool.length)]!
+}
 
 // ─── Session ID generation ────────────────────────────────────────────────────
 
@@ -302,6 +323,7 @@ export function generateSessionDNA(seed: number): SessionDNA {
   const TOTAL_ROUNDS = 60
   const challengeSequence: ChallengeRecipeId[] = []
   const materialSequence: MaterialProfile[] = []
+  const arenaSequence: ArenaFamily[] = []
   const specialRoundSchedule: number[] = []
   const eventIntensityCurve: number[] = []
   const ruleModifierSequence: number[] = []
@@ -318,6 +340,8 @@ export function generateSessionDNA(seed: number): SessionDNA {
 
   // Track last used recipe to avoid duplicates in a row
   let lastRecipeId: ChallengeRecipeId | null = null
+  // Arena history for consecutive-repeat check
+  const lastTwoArenas: ArenaFamily[] = []
   // Qualifier block tracking
   let qualifierBlock = 1
   let posInBlock = 0
@@ -381,6 +405,12 @@ export function generateSessionDNA(seed: number): SessionDNA {
     eventIntensityCurve.push(intensity)
     ruleModifierSequence.push(Math.floor(rng() * 4))
 
+    // Pick arena family
+    const arena = pickArena(rng, lastTwoArenas, isChamp)
+    arenaSequence.push(arena)
+    lastTwoArenas[0] = lastTwoArenas[1] ?? arena
+    lastTwoArenas[1] = arena
+
     roundPlans.push({
       roundNumber: round,
       recipe,
@@ -389,6 +419,7 @@ export function generateSessionDNA(seed: number): SessionDNA {
       isChampionship: isChamp,
       qualifier: qualifierBlock,
       positionInQualifier: posInBlock,
+      arenaFamily: arena,
     })
   }
 
@@ -397,6 +428,7 @@ export function generateSessionDNA(seed: number): SessionDNA {
     sessionSeed: seed,
     materialSequence,
     challengeSequence,
+    arenaSequence,
     teamOrder,
     eventIntensityCurve,
     specialRoundSchedule,

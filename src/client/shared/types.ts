@@ -5,6 +5,52 @@ export type TeamId = 'GOLD' | 'RED' | 'CYAN' | 'VIOLET' | 'EMERALD' | 'MAGENTA'
 // Material profile for the current round's sphere rendering
 export type MaterialProfile = 'POLISHED' | 'METALLIC' | 'PEARL' | 'ENERGY'
 
+// ─── Arena families ───────────────────────────────────────────────────────────
+
+export type ArenaFamily =
+  | 'CIRCLE_SURVIVAL'   // classic circular arena — existing
+  | 'ROTATING_GATES'    // circular arena with rotating gate arms
+  | 'HEX_PRESSURE'      // hexagonal arena with compressing sides
+  | 'FUNNEL_DROP'       // vertical funnel with downward gravity
+
+export const ARENA_FAMILY_NAMES: Record<ArenaFamily, string> = {
+  CIRCLE_SURVIVAL: 'CIRCLE SURVIVAL',
+  ROTATING_GATES:  'ROTATING GATES',
+  HEX_PRESSURE:    'HEX PRESSURE',
+  FUNNEL_DROP:     'FUNNEL DROP',
+}
+
+// ─── Rotating gates state ─────────────────────────────────────────────────────
+
+export interface GateArm {
+  angle: number        // current angle of this arm (radians)
+  length: number       // fraction of boundary radius (0-1)
+  width: number        // half-width in pixels
+  hasGap: boolean      // whether this arm has a passable gap
+  gapCenter: number    // fraction along arm where gap is (0-1)
+  gapSize: number      // size of gap in pixels
+}
+
+// ─── Hex pressure state ───────────────────────────────────────────────────────
+
+export interface HexSide {
+  inset: number        // how far inward this side has moved (0 = original)
+  maxInset: number     // maximum inset for this side
+  isDanger: boolean    // temporary danger side
+  dangerTimer: number  // ticks remaining as danger
+}
+
+// ─── Funnel deflector state ───────────────────────────────────────────────────
+
+export interface FunnelDeflector {
+  x: number            // center x (arena-local coords)
+  y: number            // center y
+  angle: number        // orientation angle (radians)
+  length: number       // half-length
+  speed: number        // angular velocity (radians/tick)
+  active: boolean
+}
+
 // Round phases — deterministic ordering
 export type Phase =
   | 'PREPARE'
@@ -103,6 +149,7 @@ export interface RoundIntroState {
   active: boolean
   recipeName: string
   recipeShortName: string
+  arenaFamilyName: string
   roundNumber: number
   isChampionship: boolean
   qualifier: number
@@ -231,6 +278,37 @@ export interface SimState {
   // Qualifier / block info
   currentQualifier: number
   currentPositionInQualifier: number
+
+  // ─── Pass 3: Arena family ─────────────────────────────────────────────────
+
+  arenaFamily: ArenaFamily
+  arenaFamilyName: string
+
+  // ROTATING_GATES
+  gateArms: GateArm[]
+  gateRotationSpeed: number   // radians/tick for all arms
+  gateRotationAngle: number   // shared base rotation accumulated each tick
+  gateArmCount: number
+  gateDangerOpen: boolean     // late phase: gap-less arms become lethal passages
+
+  // HEX_PRESSURE
+  hexSides: HexSide[]
+  hexRotation: number         // slow decorative rotation of hex (radians)
+  hexBaseRadius: number       // original inscribed radius
+  hexPressurePhase: number    // 0=none,1=moderate,2=heavy
+
+  // FUNNEL_DROP
+  funnelDeflectors: FunnelDeflector[]
+  funnelGravity: number       // downward force per tick (arena-local +y = down)
+  funnelChuteDanger: boolean  // late phase: bottom exit is lethal
+  funnelTopY: number          // top wall Y (arena-local)
+  funnelBottomY: number       // bottom wall Y
+  funnelLeftSlope: number     // left wall x = funnelLeftSlope * (y - funnelTopY) + funnelLeftTopX
+  funnelRightSlope: number
+  funnelLeftTopX: number
+  funnelRightTopX: number
+  funnelNeckWidth: number     // width at bottom
+  funnelNeckY: number         // y where funnel narrows to neck
 }
 
 export interface HealthResponse {

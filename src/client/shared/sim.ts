@@ -1,10 +1,11 @@
 import { mulberry32, rngRange, type Rng } from './prng'
-import { reflectCircleBoundary, resolveCircleCircle } from './physics'
+import { reflectCircleBoundary, resolveCircleCircle, reflectCircleSegment, reflectConvexPolygon } from './physics'
 import type {
-  CollisionEffect, Contestant, EliminationEffect, EventType,
-  GravityCoreMode, MaterialProfile, Phase, PulseRing,
+  ArenaFamily, CollisionEffect, Contestant, EliminationEffect, EventType,
+  FunnelDeflector, GateArm, GravityCoreMode, HexSide, MaterialProfile, Phase, PulseRing,
   SimState, TeamId, TrailPoint
 } from './types'
+import { ARENA_FAMILY_NAMES } from './types'
 import type { ChallengeRecipeId, RoundPlan, TeamStanding } from './session'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -28,6 +29,26 @@ const PULSE_POOL_SIZE     = 6
 const COLLISION_POOL_SIZE = 24
 
 const MIN_BOUNDARY = 70
+
+// ─── Rotating gates constants ─────────────────────────────────────────────────
+const GATE_ARM_POOL_SIZE = 6
+const GATE_ROTATION_SPEED_N = 0.008   // radians/tick normal
+const GATE_ROTATION_SPEED_T = 0.025   // radians/tick test
+
+// ─── Hex pressure constants ────────────────────────────────────────────────────
+const HEX_BASE_RADIUS_N = 440         // inscribed radius (center to midpoint of side)
+const HEX_INSET_RATE_ESCALATION = 0.18  // pixels/tick per active side
+const HEX_INSET_RATE_FINAL      = 0.40
+const HEX_MAX_INSET             = 280
+
+// ─── Funnel drop constants ─────────────────────────────────────────────────────
+const FUNNEL_GRAVITY_N = 0.08         // downward pull per tick normal
+const FUNNEL_GRAVITY_T = 0.18         // downward pull test mode
+const FUNNEL_GRAVITY_ESCALATION = 0.14
+const FUNNEL_GRAVITY_FINAL      = 0.22
+const FUNNEL_DEFLECTOR_POOL     = 4
+
+// Hex vertices pre-computation helper is replaced by updateHexVerts in SimEngine
 
 // ─── Phase timing (ticks at 60 TPS) ──────────────────────────────────────────
 
@@ -154,6 +175,21 @@ export class SimEngine {
   // Last round the leaderboard was shown
   private lastLeaderboardRound = 0
 
+  // Arena family for this round
+  private currentArena: ArenaFamily = 'CIRCLE_SURVIVAL'
+
+  // Pre-allocated gate arm pool
+  private gateArmPool: GateArm[]
+
+  // Pre-allocated hex side pool
+  private hexSidePool: HexSide[]
+
+  // Pre-computed hex vertices for current tick (reused, no alloc in hot loop)
+  private hexVerts: Array<{x:number;y:number}>
+
+  // Pre-allocated funnel deflector pool
+  private funnelDeflectorPool: FunnelDeflector[]
+
   // Round plans from SessionDNA (optional)
   private roundPlans: RoundPlan[] = []
 
@@ -234,6 +270,31 @@ export class SimEngine {
     // Pre-allocate standings
     this.standings = TEAMS.map(team => ({ team, sessionPoints: 0, roundWins: 0 }))
 
+    // Pre-allocate gate arm pool
+    this.gateArmPool = []
+    for (let i = 0; i < GATE_ARM_POOL_SIZE; i++) {
+      this.gateArmPool.push({
+        angle: 0, length: 0.85, width: 8,
+        hasGap: false, gapCenter: 0.5, gapSize: 40,
+      })
+    }
+
+    // Pre-allocate hex side pool (6 sides)
+    this.hexSidePool = []
+    for (let i = 0; i < 6; i++) {
+      this.hexSidePool.push({ inset: 0, maxInset: HEX_MAX_INSET, isDanger: false, dangerTimer: 0 })
+    }
+
+    // Pre-allocate hex vertices (6 points, reused)
+    this.hexVerts = []
+    for (let i = 0; i < 6; i++) this.hexVerts.push({ x: 0, y: 0 })
+
+    // Pre-allocate funnel deflector pool
+    this.funnelDeflectorPool = []
+    for (let i = 0; i < FUNNEL_DEFLECTOR_POOL; i++) {
+      this.funnelDeflectorPool.push({ x: 0, y: 0, angle: 0, length: 60, speed: 0, active: false })
+    }
+
     this.rng = mulberry32(this.seed)
     this.state = {
       tick: 0,
@@ -298,6 +359,7 @@ export class SimEngine {
         active: false,
         recipeName: 'CLASSIC SURVIVAL',
         recipeShortName: 'CLASSIC',
+        arenaFamilyName: 'CIRCLE SURVIVAL',
         roundNumber: 1,
         isChampionship: false,
         qualifier: 1,
@@ -321,6 +383,33 @@ export class SimEngine {
 
       currentQualifier: 1,
       currentPositionInQualifier: 0,
+
+      // ─── Pass 3: Arena family ─────────────────────────────────────────────
+      arenaFamily: 'CIRCLE_SURVIVAL',
+      arenaFamilyName: 'CIRCLE SURVIVAL',
+
+      gateArms: this.gateArmPool,
+      gateRotationSpeed: 0,
+      gateRotationAngle: 0,
+      gateArmCount: 4,
+      gateDangerOpen: false,
+
+      hexSides: this.hexSidePool,
+      hexRotation: 0,
+      hexBaseRadius: HEX_BASE_RADIUS_N,
+      hexPressurePhase: 0,
+
+      funnelDeflectors: this.funnelDeflectorPool,
+      funnelGravity: 0,
+      funnelChuteDanger: false,
+      funnelTopY: -460,
+      funnelBottomY: 460,
+      funnelLeftSlope: 0,
+      funnelRightSlope: 0,
+      funnelLeftTopX: -400,
+      funnelRightTopX: 400,
+      funnelNeckWidth: 100,
+      funnelNeckY: 200,
     }
 
     this.beginRound()
@@ -459,6 +548,14 @@ export class SimEngine {
     this.gauntletPattern    = 0
     this.nextPulsePanicTick = 0
 
+    // ─── Determine arena family from plan ──────────────────────────────────
+    const arenaFamily: ArenaFamily = plan ? plan.arenaFamily : 'CIRCLE_SURVIVAL'
+    this.currentArena = arenaFamily
+    s.arenaFamily = arenaFamily
+    s.arenaFamilyName = ARENA_FAMILY_NAMES[arenaFamily]
+
+    this.initArena(arenaFamily)
+
     s.roundMaterial = plan
       ? plan.materialProfile
       : materialForRound(s.round, s.materialOverride)
@@ -494,6 +591,7 @@ export class SimEngine {
       active: true,
       recipeName: s.currentRecipeName,
       recipeShortName: plan ? plan.recipe.shortName : 'CLASSIC',
+      arenaFamilyName: s.arenaFamilyName,
       roundNumber: s.round,
       isChampionship: this.isChampionship,
       qualifier: s.currentQualifier,
@@ -505,6 +603,454 @@ export class SimEngine {
     s.phaseTicksRemaining = s.roundIntro.ticksRemaining
 
     this.updateNextEventHint()
+  }
+
+  // ─── Arena initializers ───────────────────────────────────────────────────
+
+  private initArena(family: ArenaFamily): void {
+    const s = this.state
+    switch (family) {
+      case 'CIRCLE_SURVIVAL':
+        s.boundaryRadius     = FULL_BOUNDARY
+        s.fullBoundaryRadius = FULL_BOUNDARY
+        break
+
+      case 'ROTATING_GATES': {
+        s.boundaryRadius     = FULL_BOUNDARY
+        s.fullBoundaryRadius = FULL_BOUNDARY
+        const armCount = 3 + Math.floor(this.rng() * 4)  // 3-6
+        s.gateArmCount = armCount
+        s.gateRotationSpeed = this.t(GATE_ROTATION_SPEED_T, GATE_ROTATION_SPEED_N) *
+          (this.rng() > 0.5 ? 1 : -1)
+        s.gateRotationAngle = rngRange(this.rng, 0, Math.PI * 2)
+        s.gateDangerOpen = false
+        // Init arms
+        for (let i = 0; i < GATE_ARM_POOL_SIZE; i++) {
+          const arm = this.gateArmPool[i]!
+          if (i < armCount) {
+            arm.angle = s.gateRotationAngle + (i / armCount) * Math.PI * 2
+            arm.length = 0.75 + this.rng() * 0.18
+            arm.width = 7 + this.rng() * 6
+            arm.hasGap = this.rng() > 0.35   // 65% of arms have a gap
+            arm.gapCenter = 0.35 + this.rng() * 0.40
+            arm.gapSize = 36 + this.rng() * 28
+          } else {
+            arm.angle = 0
+            arm.length = 0
+          }
+        }
+        // Spawn contestants inside (not near boundary)
+        for (let i = 0; i < TOTAL; i++) {
+          const c = this.pool[i]!
+          const angle = rngRange(this.rng, 0, Math.PI * 2)
+          const r = rngRange(this.rng, 0.10, 0.50) * FULL_BOUNDARY
+          c.x = Math.cos(angle) * r
+          c.y = Math.sin(angle) * r
+        }
+        break
+      }
+
+      case 'HEX_PRESSURE': {
+        s.hexBaseRadius = HEX_BASE_RADIUS_N
+        s.hexRotation = rngRange(this.rng, 0, Math.PI * 2)
+        s.hexPressurePhase = 0
+        // Reset all sides
+        for (let i = 0; i < 6; i++) {
+          const side = this.hexSidePool[i]!
+          side.inset = 0
+          side.maxInset = HEX_MAX_INSET
+          side.isDanger = false
+          side.dangerTimer = 0
+        }
+        // Spawn contestants inside hex
+        const R = s.hexBaseRadius * 0.85   // vertex radius = hexBaseRadius / cos(30°) ≈ 1.155
+        for (let i = 0; i < TOTAL; i++) {
+          const c = this.pool[i]!
+          const angle = rngRange(this.rng, 0, Math.PI * 2)
+          const r = rngRange(this.rng, 0.08, 0.48) * R
+          c.x = Math.cos(angle) * r
+          c.y = Math.sin(angle) * r
+        }
+        break
+      }
+
+      case 'FUNNEL_DROP': {
+        // Funnel geometry — centered at origin
+        // Top wide chamber: ±380 x, from y=-420 to y=-100
+        // Funnel slope: narrows from ±380 to ±80 between y=-100 and y=180
+        // Bottom chute:  ±80 x, from y=180 down to y=420
+        s.funnelTopY      = -420
+        s.funnelBottomY   = 420
+        s.funnelLeftTopX  = -370
+        s.funnelRightTopX =  370
+        s.funnelNeckWidth =  90
+        s.funnelNeckY     =  180
+        // Slopes: from (leftTopX, -100) to (-neckWidth/2, neckY)
+        const slopeY1 = -100
+        const slopeY2 = s.funnelNeckY
+        const slopeDY = slopeY2 - slopeY1
+        s.funnelLeftSlope  = (-s.funnelNeckWidth/2 - s.funnelLeftTopX)  / slopeDY
+        s.funnelRightSlope = ( s.funnelNeckWidth/2 - s.funnelRightTopX) / slopeDY
+        s.funnelGravity = this.t(FUNNEL_GRAVITY_T, FUNNEL_GRAVITY_N)
+        s.funnelChuteDanger = false
+        // Init deflectors at fixed interior positions
+        const deflPos = [
+          { x: -160, y: -260, speed:  0.012 },
+          { x:  160, y: -260, speed: -0.010 },
+          { x:    0, y: -60,  speed:  0.015 },
+          { x: -90,  y:  80,  speed: -0.013 },
+        ]
+        for (let i = 0; i < FUNNEL_DEFLECTOR_POOL; i++) {
+          const d = this.funnelDeflectorPool[i]!
+          const pos = deflPos[i]!
+          d.x = pos.x
+          d.y = pos.y
+          d.angle = rngRange(this.rng, 0, Math.PI)
+          d.length = 50 + this.rng() * 30
+          d.speed = pos.speed * (this.testMode ? 2.5 : 1)
+          d.active = true
+        }
+        // Spawn in upper chamber
+        for (let i = 0; i < TOTAL; i++) {
+          const c = this.pool[i]!
+          c.x = rngRange(this.rng, -300, 300)
+          c.y = rngRange(this.rng, -380, -120)
+          const vAngle = rngRange(this.rng, 0, Math.PI * 2)
+          c.vx = Math.cos(vAngle) * INIT_SPEED
+          c.vy = Math.sin(vAngle) * INIT_SPEED * 0.5
+        }
+        break
+      }
+    }
+  }
+
+  // ─── Arena physics per tick ───────────────────────────────────────────────
+
+  private tickArena(): void {
+    switch (this.currentArena) {
+      case 'CIRCLE_SURVIVAL': break
+      case 'ROTATING_GATES':  this.tickRotatingGates(); break
+      case 'HEX_PRESSURE':    this.tickHexPressure();   break
+      case 'FUNNEL_DROP':     this.tickFunnelDrop();    break
+    }
+  }
+
+  private applyArenaBoundary(phase: Phase): void {
+    switch (this.currentArena) {
+      case 'CIRCLE_SURVIVAL': break  // handled by existing collide()
+      case 'ROTATING_GATES':  this.applyRotatingGatesBoundary(); break
+      case 'HEX_PRESSURE':    this.applyHexBoundary(phase); break
+      case 'FUNNEL_DROP':     this.applyFunnelBoundary(phase); break
+    }
+  }
+
+  // ─── ROTATING_GATES physics ───────────────────────────────────────────────
+
+  private tickRotatingGates(): void {
+    const s = this.state
+    s.gateRotationAngle += s.gateRotationSpeed
+
+    // Update arm angles
+    for (let i = 0; i < s.gateArmCount; i++) {
+      const arm = this.gateArmPool[i]!
+      arm.angle = s.gateRotationAngle + (i / s.gateArmCount) * Math.PI * 2
+    }
+
+    // Apply gate collision to each contestant
+    for (let ci = 0; ci < TOTAL; ci++) {
+      const c = this.pool[ci]!
+      if (!c.alive) continue
+      this.applyGateArmCollisions(c)
+    }
+  }
+
+  private applyGateArmCollisions(c: Contestant): void {
+    const s = this.state
+    const br = s.boundaryRadius
+
+    for (let i = 0; i < s.gateArmCount; i++) {
+      const arm = this.gateArmPool[i]!
+      const armLen = arm.length * br
+      const ca = Math.cos(arm.angle)
+      const sa = Math.sin(arm.angle)
+
+      if (arm.hasGap) {
+        // Segment 1: from center to gap start
+        const gapStart = (arm.gapCenter - arm.gapSize / 2 / armLen)
+        const gapEnd   = (arm.gapCenter + arm.gapSize / 2 / armLen)
+        const seg1End  = Math.max(0, gapStart) * armLen
+        const seg2Start = Math.min(1, gapEnd) * armLen
+        const seg2End   = armLen
+
+        if (seg1End > 8) {
+          reflectCircleSegment(c, 0, 0, ca * seg1End, sa * seg1End)
+        }
+        if (seg2End > seg2Start + 8) {
+          reflectCircleSegment(c, ca * seg2Start, sa * seg2Start, ca * seg2End, sa * seg2End)
+        }
+      } else {
+        // Full solid arm — during late phase, gap-less arms act as blockers but not lethal
+        reflectCircleSegment(c, 0, 0, ca * armLen, sa * armLen)
+      }
+    }
+  }
+
+  private applyRotatingGatesBoundary(): void {
+    const br = this.state.boundaryRadius
+    for (let i = 0; i < TOTAL; i++) {
+      const c = this.pool[i]!
+      if (!c.alive) continue
+      reflectCircleBoundary(c, br)
+    }
+  }
+
+  // ─── HEX_PRESSURE physics ─────────────────────────────────────────────────
+
+  private tickHexPressure(): void {
+    const s = this.state
+    // Slow hex decorative rotation
+    s.hexRotation += 0.0004
+
+    // Handle danger side timers
+    for (let i = 0; i < 6; i++) {
+      const side = this.hexSidePool[i]!
+      if (side.isDanger && side.dangerTimer > 0) {
+        side.dangerTimer--
+        if (side.dangerTimer <= 0) side.isDanger = false
+      }
+    }
+
+    // In ESCALATION/FINAL: inset active sides and maybe add danger
+    const phase = s.phase
+    if (phase === 'ESCALATION' || phase === 'FINAL') {
+      const isFinal = phase === 'FINAL'
+      const insetRate = isFinal ? HEX_INSET_RATE_FINAL : HEX_INSET_RATE_ESCALATION
+      // Advance 1-2 sides per escalation tick
+      for (let i = 0; i < 6; i++) {
+        const side = this.hexSidePool[i]!
+        // Only inset every N ticks to control speed
+        const insetEvery = isFinal ? 1 : 2
+        if (s.roundTick % insetEvery === 0) {
+          // Deterministic side selection: inset sides that are "active"
+          const active = (i % 2 === (s.roundTick >> 4) % 2) || isFinal
+          if (active) {
+            side.inset = Math.min(side.maxInset, side.inset + insetRate)
+          }
+        }
+      }
+    }
+  }
+
+  private applyHexBoundary(phase: Phase): void {
+    const s = this.state
+
+    // Compute hex vertices with current insets
+    const R = s.hexBaseRadius   // inscribed radius (center to midpoint of side)
+    const vertR = R / Math.cos(Math.PI / 6)   // circumradius
+
+    // Build inset-adjusted vertices
+    this.updateHexVerts(vertR, s.hexRotation, s.hexSides)
+
+    for (let ci = 0; ci < TOTAL; ci++) {
+      const c = this.pool[ci]!
+      if (!c.alive) continue
+
+      const hit = reflectConvexPolygon(c, this.hexVerts)
+
+      // Danger sides: eliminate contestant touching inset danger side
+      if (phase === 'ESCALATION' || phase === 'FINAL') {
+        for (let i = 0; i < 6; i++) {
+          const side = this.hexSidePool[i]!
+          if (!side.isDanger) continue
+          // Check if contestant is near this side
+          const a = this.hexVerts[i]!
+          const b = this.hexVerts[(i + 1) % 6]!
+          const segDx = b.x - a.x
+          const segDy = b.y - a.y
+          const segLen = Math.sqrt(segDx * segDx + segDy * segDy)
+          if (segLen < 0.1) continue
+          const t = Math.max(0, Math.min(1, ((c.x - a.x) * segDx + (c.y - a.y) * segDy) / (segLen * segLen)))
+          const cx = a.x + t * segDx
+          const cy = a.y + t * segDy
+          const dx = c.x - cx
+          const dy = c.y - cy
+          const dist = Math.sqrt(dx * dx + dy * dy)
+          if (dist < c.radius * 2.2) {
+            c.alive = false
+            this.spawnEffect(c.x, c.y, c.team)
+            this.state.eliminationCount++
+          }
+        }
+      }
+
+      if (!hit) {
+        // Suppress unused var warning
+        void hit
+      }
+    }
+
+    // Occasional danger side trigger in ESCALATION
+    if ((phase === 'ESCALATION' || phase === 'FINAL') &&
+        s.roundTick % this.t(60, 240) === 37) {
+      const sideIdx = Math.floor(this.rng() * 6)
+      const side = this.hexSidePool[sideIdx]!
+      if (!side.isDanger) {
+        side.isDanger = true
+        side.dangerTimer = this.t(40, 180)
+      }
+    }
+  }
+
+  private updateHexVerts(
+    vertR: number,
+    rotation: number,
+    sides: HexSide[]
+  ): void {
+    // Compute basic outer hex vertices
+    const outer: Array<{x:number;y:number}> = []
+    for (let i = 0; i < 6; i++) {
+      const a = rotation + (i / 6) * Math.PI * 2
+      outer.push({ x: Math.cos(a) * vertR, y: Math.sin(a) * vertR })
+    }
+
+    // Each side is midpoint-inward by side.inset pixels
+    // The midpoint of edge i→i+1 moves inward by inset[i]
+    // We approximate by moving each vertex by the average of adjacent sides' insets
+    for (let i = 0; i < 6; i++) {
+      const insetA = sides[(i + 5) % 6]!.inset   // previous side
+      const insetB = sides[i]!.inset               // current side
+      const avgInset = (insetA + insetB) * 0.5
+
+      // Inward direction for this vertex = toward center
+      const vx = outer[i]!.x
+      const vy = outer[i]!.y
+      const vLen = Math.sqrt(vx * vx + vy * vy)
+      const nx = vLen > 0 ? -vx / vLen : 0
+      const ny = vLen > 0 ? -vy / vLen : 0
+
+      this.hexVerts[i]!.x = outer[i]!.x + nx * avgInset
+      this.hexVerts[i]!.y = outer[i]!.y + ny * avgInset
+    }
+  }
+
+  // ─── FUNNEL_DROP physics ──────────────────────────────────────────────────
+
+  private tickFunnelDrop(): void {
+    const s = this.state
+
+    // Rotate deflectors
+    for (let i = 0; i < FUNNEL_DEFLECTOR_POOL; i++) {
+      const d = this.funnelDeflectorPool[i]!
+      if (!d.active) continue
+      d.angle += d.speed
+    }
+
+    // Apply gravity
+    for (let i = 0; i < TOTAL; i++) {
+      const c = this.pool[i]!
+      if (!c.alive) continue
+      c.vy += s.funnelGravity
+      if (c.vy > MAX_SPEED) c.vy = MAX_SPEED
+    }
+
+    // Apply deflector collisions
+    for (let i = 0; i < TOTAL; i++) {
+      const c = this.pool[i]!
+      if (!c.alive) continue
+      for (let d = 0; d < FUNNEL_DEFLECTOR_POOL; d++) {
+        const defl = this.funnelDeflectorPool[d]!
+        if (!defl.active) continue
+        const ca = Math.cos(defl.angle)
+        const sa = Math.sin(defl.angle)
+        const ax = defl.x - ca * defl.length
+        const ay = defl.y - sa * defl.length
+        const bx = defl.x + ca * defl.length
+        const by = defl.y + sa * defl.length
+        reflectCircleSegment(c, ax, ay, bx, by)
+      }
+    }
+  }
+
+  private applyFunnelBoundary(phase: Phase): void {
+    const s = this.state
+    const topY    = s.funnelTopY
+    const bottomY = s.funnelBottomY
+    const leftTopX  = s.funnelLeftTopX
+    const rightTopX = s.funnelRightTopX
+    const neckW   = s.funnelNeckWidth
+    const neckY   = s.funnelNeckY
+    const slopeY1 = -100
+    const slopeY2 = neckY
+
+    for (let i = 0; i < TOTAL; i++) {
+      const c = this.pool[i]!
+      if (!c.alive) continue
+
+      // Top wall
+      if (c.y - c.radius < topY) {
+        c.y = topY + c.radius
+        if (c.vy < 0) c.vy = -c.vy * 0.6
+      }
+
+      // Determine which zone contestant is in by y
+      if (c.y < slopeY1) {
+        // Upper chamber: vertical side walls
+        if (c.x - c.radius < leftTopX) { c.x = leftTopX + c.radius; if (c.vx < 0) c.vx = -c.vx * 0.75 }
+        if (c.x + c.radius > rightTopX) { c.x = rightTopX - c.radius; if (c.vx > 0) c.vx = -c.vx * 0.75 }
+      } else if (c.y < slopeY2) {
+        // Sloped funnel walls
+        const leftX  = leftTopX  + s.funnelLeftSlope  * (c.y - slopeY1)
+        const rightX = rightTopX + s.funnelRightSlope * (c.y - slopeY1)
+        // Left funnel wall
+        if (c.x - c.radius < leftX) {
+          c.x = leftX + c.radius
+          // Reflect along sloped normal
+          const slopeAngle = Math.atan2(s.funnelLeftSlope, 1)  // dy=1, dx=slope
+          const nx =  Math.sin(slopeAngle)  // right = inward
+          const ny = -Math.cos(slopeAngle)
+          // Use normalized inward normal (pointing right & slightly down)
+          const inNx = Math.cos(slopeAngle + Math.PI/2)
+          const inNy = Math.sin(slopeAngle + Math.PI/2)
+          const dot = c.vx * inNx + c.vy * inNy
+          if (dot < 0) { c.vx -= 2 * dot * inNx * 0.75; c.vy -= 2 * dot * inNy * 0.75 }
+          void nx; void ny
+        }
+        // Right funnel wall
+        if (c.x + c.radius > rightX) {
+          c.x = rightX - c.radius
+          const slopeAngle = Math.atan2(-s.funnelRightSlope, 1)
+          const inNx = Math.cos(Math.PI - slopeAngle - Math.PI/2)
+          const inNy = Math.sin(Math.PI - slopeAngle - Math.PI/2)
+          const dot = c.vx * inNx + c.vy * inNy
+          if (dot < 0) { c.vx -= 2 * dot * inNx * 0.75; c.vy -= 2 * dot * inNy * 0.75 }
+        }
+      } else {
+        // Bottom chute
+        if (c.x - c.radius < -neckW/2) { c.x = -neckW/2 + c.radius; if (c.vx < 0) c.vx = -c.vx * 0.75 }
+        if (c.x + c.radius >  neckW/2) { c.x =  neckW/2 - c.radius; if (c.vx > 0) c.vx = -c.vx * 0.75 }
+
+        // Late phase: bottom exit is lethal
+        if (c.y > bottomY - c.radius) {
+          if (phase === 'ESCALATION' || phase === 'FINAL') {
+            c.alive = false
+            this.spawnEffect(c.x, c.y, c.team)
+            this.state.eliminationCount++
+          } else {
+            // Bounce off bottom
+            c.y = bottomY - c.radius
+            if (c.vy > 0) c.vy = -c.vy * 0.6
+          }
+        }
+      }
+    }
+
+    // Increase gravity in escalation/final
+    if (phase === 'ESCALATION') {
+      s.funnelGravity = this.t(FUNNEL_GRAVITY_T, FUNNEL_GRAVITY_ESCALATION)
+    } else if (phase === 'FINAL') {
+      s.funnelGravity = this.t(FUNNEL_GRAVITY_T * 1.5, FUNNEL_GRAVITY_FINAL)
+      s.funnelChuteDanger = true
+    }
   }
 
   private updateNextEventHint(): void {
@@ -566,7 +1112,9 @@ export class SimEngine {
     }
 
     if (phase === 'PREPARE') {
+      this.tickArena()
       this.integrate()
+      this.applyArenaBoundary(phase)
       this.collide(false)
       if (this.state.phaseTicksRemaining <= 0) {
         this.enterPhase('OPENING')
@@ -577,7 +1125,12 @@ export class SimEngine {
       if (this.currentRecipeId === 'GRAVITY_CORE') {
         this.tickGravityCore()
       }
+      this.tickArena()
       this.integrate()
+      this.applyArenaBoundary(phase)
+      this.applyRepulsor()
+      this.applyDangerArc()
+      this.applyGravityCore()
       this.collide(false)
       this.checkMilestones()
       if (this.state.phaseTicksRemaining <= 0) {
@@ -587,11 +1140,14 @@ export class SimEngine {
     } else if (phase === 'DANGER') {
       this.tickEvent()
       if (this.currentRecipeId === 'GRAVITY_CORE') this.tickGravityCore()
+      this.tickArena()
       this.integrate()
+      this.applyArenaBoundary(phase)
       this.applyRepulsor()
       this.applyDangerArc()
       this.applyGravityCore()
-      this.collide(false)
+      if (this.currentArena === 'CIRCLE_SURVIVAL') this.collide(false)
+      else this.collide(false)
       this.checkMilestones()
       this.checkTeamEliminations()
       if (this.state.phaseTicksRemaining <= 0) {
@@ -602,20 +1158,26 @@ export class SimEngine {
     } else if (phase === 'ESCALATION') {
       this.tickEvent()
       if (this.currentRecipeId === 'GRAVITY_CORE') this.tickGravityCore()
-      // Shrink
-      this.state.pressureActive = true
+      // Boundary shrink for circle arenas
       const isSudden = this.currentRecipeId === 'SUDDEN_DEATH'
-      this.state.shrinkRate = this.t(SHRINK_ESCALATION_T,
-        isSudden ? SHRINK_ESCALATION_SUDDEN_N : SHRINK_ESCALATION_N)
-      this.state.boundaryRadius = Math.max(
-        MIN_BOUNDARY + 80,
-        this.state.boundaryRadius - this.state.shrinkRate
-      )
+      if (this.currentArena === 'CIRCLE_SURVIVAL' || this.currentArena === 'ROTATING_GATES') {
+        this.state.pressureActive = true
+        this.state.shrinkRate = this.t(SHRINK_ESCALATION_T,
+          isSudden ? SHRINK_ESCALATION_SUDDEN_N : SHRINK_ESCALATION_N)
+        this.state.boundaryRadius = Math.max(
+          MIN_BOUNDARY + 80,
+          this.state.boundaryRadius - this.state.shrinkRate
+        )
+      }
+      this.tickArena()
       this.integrate()
+      this.applyArenaBoundary(phase)
       this.applyRepulsor()
       this.applyDangerArc()
       this.applyGravityCore()
-      this.eliminateOutside()
+      if (this.currentArena === 'CIRCLE_SURVIVAL' || this.currentArena === 'ROTATING_GATES') {
+        this.eliminateOutside()
+      }
       this.collide(true)
       this.checkMilestones()
       this.checkTeamEliminations()
@@ -631,18 +1193,24 @@ export class SimEngine {
     } else if (phase === 'FINAL') {
       this.tickEvent()
       if (this.currentRecipeId === 'GRAVITY_CORE') this.tickGravityCore()
-      const isSudden = this.currentRecipeId === 'SUDDEN_DEATH'
-      this.state.shrinkRate = this.t(SHRINK_FINAL_T,
-        isSudden ? SHRINK_FINAL_SUDDEN_N : SHRINK_FINAL_N)
-      this.state.boundaryRadius = Math.max(
-        MIN_BOUNDARY,
-        this.state.boundaryRadius - this.state.shrinkRate
-      )
+      const isSudden2 = this.currentRecipeId === 'SUDDEN_DEATH'
+      if (this.currentArena === 'CIRCLE_SURVIVAL' || this.currentArena === 'ROTATING_GATES') {
+        this.state.shrinkRate = this.t(SHRINK_FINAL_T,
+          isSudden2 ? SHRINK_FINAL_SUDDEN_N : SHRINK_FINAL_N)
+        this.state.boundaryRadius = Math.max(
+          MIN_BOUNDARY,
+          this.state.boundaryRadius - this.state.shrinkRate
+        )
+      }
+      this.tickArena()
       this.integrate()
+      this.applyArenaBoundary(phase)
       this.applyRepulsor()
       this.applyDangerArc()
       this.applyGravityCore()
-      this.eliminateOutside()
+      if (this.currentArena === 'CIRCLE_SURVIVAL' || this.currentArena === 'ROTATING_GATES') {
+        this.eliminateOutside()
+      }
       this.collide(true)
       this.checkMilestones()
       this.checkTeamEliminations()
@@ -1021,6 +1589,7 @@ export class SimEngine {
   }
 
   private integrateWinner(): void {
+    const isCircular = this.currentArena === 'CIRCLE_SURVIVAL' || this.currentArena === 'ROTATING_GATES'
     for (let i = 0; i < TOTAL; i++) {
       const c = this.pool[i]!
       if (!c.alive) continue
@@ -1028,7 +1597,15 @@ export class SimEngine {
       c.vy *= 0.96
       c.x += c.vx
       c.y += c.vy
-      reflectCircleBoundary(c, this.state.boundaryRadius)
+      if (isCircular) {
+        reflectCircleBoundary(c, this.state.boundaryRadius)
+      } else {
+        // Simple clamp to keep winners on screen
+        if (c.x < -500) { c.x = -500; c.vx = Math.abs(c.vx) }
+        if (c.x >  500) { c.x =  500; c.vx = -Math.abs(c.vx) }
+        if (c.y < -480) { c.y = -480; c.vy = Math.abs(c.vy) }
+        if (c.y >  480) { c.y =  480; c.vy = -Math.abs(c.vy) }
+      }
     }
   }
 
@@ -1093,7 +1670,10 @@ export class SimEngine {
 
   private collide(escalation: boolean): void {
     const boundary = this.state.boundaryRadius
-    if (!escalation) {
+    // Only apply circle boundary reflection for CIRCLE_SURVIVAL and ROTATING_GATES
+    // (other arenas handle their own boundary in applyArenaBoundary)
+    const isCircular = this.currentArena === 'CIRCLE_SURVIVAL' || this.currentArena === 'ROTATING_GATES'
+    if (!escalation && isCircular) {
       for (let i = 0; i < TOTAL; i++) {
         if (this.pool[i]!.alive) reflectCircleBoundary(this.pool[i]!, boundary)
       }

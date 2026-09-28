@@ -1,4 +1,4 @@
-import type { SimState, TeamId } from '../shared/types'
+import type { SimState, TeamId, GateArm, HexSide, FunnelDeflector } from '../shared/types'
 import { drawSphere } from './material'
 
 const W  = 1920
@@ -284,28 +284,34 @@ function drawRoundIntro(ctx: CanvasRenderingContext2D, state: SimState): void {
   ctx.textBaseline = 'middle'
   ctx.font = `bold 36px monospace`
   ctx.fillStyle = `rgba(100,140,180,${alpha.toFixed(2)})`
-  ctx.fillText(`ROUND ${intro.roundNumber}`, CX, CY - 150)
+  ctx.fillText(`ROUND ${intro.roundNumber}`, CX, CY - 160)
 
-  // Challenge name — large
-  ctx.font = `bold ${intro.isChampionship ? 96 : 80}px monospace`
+  // Arena family name — prominent, shown above challenge
+  const arenaColor = getArenaColor(intro.arenaFamilyName, alpha)
+  ctx.font = `bold 52px monospace`
+  ctx.fillStyle = arenaColor
+  ctx.fillText(intro.arenaFamilyName, CX, CY - 90)
+
+  // Challenge name — medium below arena name
+  ctx.font = `bold ${intro.isChampionship ? 80 : 60}px monospace`
   const nameColor = intro.isChampionship ? `rgba(255,215,0,${alpha.toFixed(2)})`
-                  : `rgba(220,240,255,${alpha.toFixed(2)})`
+                  : `rgba(180,210,255,${alpha.toFixed(2)})`
   ctx.fillStyle = nameColor
-  ctx.fillText(intro.recipeName, CX, CY - 40)
+  ctx.fillText(intro.recipeName, CX, CY + 14)
 
   // Teams participating
   const teams = TEAMS_ORDER
   const teamLine = teams.map(t => TEAM_LABEL[t]).join('  ·  ')
   ctx.font = '22px monospace'
   ctx.fillStyle = `rgba(140,160,180,${(alpha * 0.8).toFixed(2)})`
-  ctx.fillText(teamLine, CX, CY + 80)
+  ctx.fillText(teamLine, CX, CY + 100)
 
   // Thin separator line
   ctx.strokeStyle = `rgba(80,100,140,${(alpha * 0.5).toFixed(2)})`
   ctx.lineWidth = 1
   ctx.beginPath()
-  ctx.moveTo(CX - 400, CY + 110)
-  ctx.lineTo(CX + 400, CY + 110)
+  ctx.moveTo(CX - 400, CY + 130)
+  ctx.lineTo(CX + 400, CY + 130)
   ctx.stroke()
 
   // Session phase hint
@@ -314,7 +320,25 @@ function drawRoundIntro(ctx: CanvasRenderingContext2D, state: SimState): void {
   const phaseLabel = state.sessionPhase === 'LATE' ? 'LATE SESSION'
                    : state.sessionPhase === 'MID'  ? 'MID SESSION'
                    :                                 'EARLY SESSION'
-  ctx.fillText(phaseLabel, CX, CY + 145)
+  ctx.fillText(phaseLabel, CX, CY + 165)
+}
+
+function getArenaColor(arenaName: string, alpha: number): string {
+  if (arenaName === 'CIRCLE SURVIVAL')  return `rgba(80,160,255,${alpha.toFixed(2)})`
+  if (arenaName === 'ROTATING GATES')   return `rgba(255,160,40,${alpha.toFixed(2)})`
+  if (arenaName === 'HEX PRESSURE')     return `rgba(60,255,180,${alpha.toFixed(2)})`
+  if (arenaName === 'FUNNEL DROP')      return `rgba(255,80,200,${alpha.toFixed(2)})`
+  return `rgba(200,220,255,${alpha.toFixed(2)})`
+}
+
+function getArenaHudColor(family: string): string {
+  switch (family) {
+    case 'CIRCLE_SURVIVAL': return 'rgba(80,160,255,0.65)'
+    case 'ROTATING_GATES':  return 'rgba(255,160,40,0.65)'
+    case 'HEX_PRESSURE':    return 'rgba(60,255,180,0.65)'
+    case 'FUNNEL_DROP':     return 'rgba(255,80,200,0.65)'
+    default:                return 'rgba(140,160,180,0.50)'
+  }
 }
 
 // ─── Leaderboard screen ───────────────────────────────────────────────────────
@@ -393,6 +417,27 @@ function drawLeaderboardScreen(ctx: CanvasRenderingContext2D, state: SimState): 
 // ─── Arena ────────────────────────────────────────────────────────────────────
 
 function drawArena(ctx: CanvasRenderingContext2D, state: SimState): void {
+  const family = state.arenaFamily ?? 'CIRCLE_SURVIVAL'
+
+  switch (family) {
+    case 'CIRCLE_SURVIVAL':
+      drawCircleArena(ctx, state)
+      break
+    case 'ROTATING_GATES':
+      drawRotatingGatesArena(ctx, state)
+      break
+    case 'HEX_PRESSURE':
+      drawHexPressureArena(ctx, state)
+      break
+    case 'FUNNEL_DROP':
+      drawFunnelDropArena(ctx, state)
+      break
+  }
+}
+
+// ─── Circle Survival (existing arena) ────────────────────────────────────────
+
+function drawCircleArena(ctx: CanvasRenderingContext2D, state: SimState): void {
   const br    = state.boundaryRadius
   const phase = state.phase
   const isPressure = state.pressureActive
@@ -443,6 +488,629 @@ function drawArena(ctx: CanvasRenderingContext2D, state: SimState): void {
   ctx.drawImage(ringImg, CX - half, CY - half)
 
   drawPhaseRingOverlay(ctx, br, phase, isPressure)
+}
+
+// ─── Rotating Gates Arena ─────────────────────────────────────────────────────
+
+function drawRotatingGatesArena(ctx: CanvasRenderingContext2D, state: SimState): void {
+  const br = state.boundaryRadius
+  const phase = state.phase
+
+  // Background — same as circle but with mechanical tint
+  const bgGrad = ctx.createRadialGradient(CX, CY, 0, CX, CY, br)
+  bgGrad.addColorStop(0.00, 'rgba(10,8,20,0.85)')
+  bgGrad.addColorStop(0.50, 'rgba(6,8,22,0.70)')
+  bgGrad.addColorStop(0.85, 'rgba(2,4,14,0.82)')
+  bgGrad.addColorStop(1.00, 'rgba(0,2,10,0.92)')
+  ctx.beginPath()
+  ctx.arc(CX, CY, br, 0, Math.PI * 2)
+  ctx.fillStyle = bgGrad
+  ctx.fill()
+
+  drawArenaInteriorDetail(ctx, br)
+
+  // Draw gate arms
+  const armCount = state.gateArmCount
+  for (let i = 0; i < armCount; i++) {
+    const arm = state.gateArms[i]
+    if (!arm || arm.length === 0) continue
+    drawGateArm(ctx, arm, br, state)
+  }
+
+  // Danger arc / repulsor events still apply in ROTATING_GATES
+  if (state.activeEvent === 'DANGER_ARC') drawDangerArc(ctx, state, br)
+  if (state.repulsorActive) drawRepulsorDevice(ctx, state)
+
+  // Ring
+  const ringImg = getArenaRingCanvas(br)
+  const half = ringImg.width / 2
+  ctx.drawImage(ringImg, CX - half, CY - half)
+  drawPhaseRingOverlay(ctx, br, phase, state.pressureActive)
+}
+
+function drawGateArm(
+  ctx: CanvasRenderingContext2D,
+  arm: GateArm,
+  br: number,
+  state: SimState
+): void {
+  const armLen = arm.length * br
+  const ca = Math.cos(arm.angle)
+  const sa = Math.sin(arm.angle)
+
+  const phase = state.phase
+  const isHot = phase === 'ESCALATION' || phase === 'FINAL'
+
+  // Arm color — mechanical steel with phase tint
+  const baseAlpha = isHot ? 0.92 : 0.78
+  const armColor = isHot
+    ? `rgba(255,80,30,${baseAlpha})`
+    : 'rgba(140,160,200,0.75)'
+  const edgeColor = isHot
+    ? 'rgba(255,150,60,0.60)'
+    : 'rgba(200,220,255,0.35)'
+  const w = arm.width
+
+  if (arm.hasGap) {
+    const gapFrac = arm.gapCenter
+    const halfGap = arm.gapSize / 2 / armLen
+    const seg1End   = Math.max(0.0, gapFrac - halfGap) * armLen
+    const seg2Start = Math.min(1.0, gapFrac + halfGap) * armLen
+
+    // Segment 1: center to gap
+    if (seg1End > 6) {
+      ctx.beginPath()
+      ctx.moveTo(CX, CY)
+      ctx.lineTo(CX + ca * seg1End, CY + sa * seg1End)
+      ctx.strokeStyle = armColor
+      ctx.lineWidth = w
+      ctx.stroke()
+      ctx.beginPath()
+      ctx.moveTo(CX, CY)
+      ctx.lineTo(CX + ca * seg1End, CY + sa * seg1End)
+      ctx.strokeStyle = edgeColor
+      ctx.lineWidth = 1.5
+      ctx.stroke()
+    }
+    // Segment 2: gap to arm tip
+    if (seg2Start < armLen - 6) {
+      ctx.beginPath()
+      ctx.moveTo(CX + ca * seg2Start, CY + sa * seg2Start)
+      ctx.lineTo(CX + ca * armLen,    CY + sa * armLen)
+      ctx.strokeStyle = armColor
+      ctx.lineWidth = w
+      ctx.stroke()
+      ctx.beginPath()
+      ctx.moveTo(CX + ca * seg2Start, CY + sa * seg2Start)
+      ctx.lineTo(CX + ca * armLen,    CY + sa * armLen)
+      ctx.strokeStyle = edgeColor
+      ctx.lineWidth = 1.5
+      ctx.stroke()
+    }
+    // Gap indicator — bright dot in gap center
+    const gapX = CX + ca * (gapFrac * armLen)
+    const gapY = CY + sa * (gapFrac * armLen)
+    ctx.beginPath()
+    ctx.arc(gapX, gapY, 5, 0, Math.PI * 2)
+    ctx.fillStyle = 'rgba(0,255,180,0.55)'
+    ctx.fill()
+  } else {
+    // Full solid arm
+    ctx.beginPath()
+    ctx.moveTo(CX, CY)
+    ctx.lineTo(CX + ca * armLen, CY + sa * armLen)
+    ctx.strokeStyle = isHot ? 'rgba(255,60,20,0.90)' : 'rgba(160,180,220,0.80)'
+    ctx.lineWidth = w
+    ctx.stroke()
+    // Edge highlight
+    ctx.beginPath()
+    ctx.moveTo(CX, CY)
+    ctx.lineTo(CX + ca * armLen, CY + sa * armLen)
+    ctx.strokeStyle = edgeColor
+    ctx.lineWidth = 1.5
+    ctx.stroke()
+    // Tip indicator
+    ctx.beginPath()
+    ctx.arc(CX + ca * armLen, CY + sa * armLen, 5, 0, Math.PI * 2)
+    ctx.fillStyle = isHot ? 'rgba(255,100,0,0.80)' : 'rgba(140,180,240,0.60)'
+    ctx.fill()
+  }
+
+  // Central hub
+  ctx.beginPath()
+  ctx.arc(CX, CY, 10, 0, Math.PI * 2)
+  ctx.fillStyle = isHot ? 'rgba(255,80,0,0.50)' : 'rgba(60,90,160,0.40)'
+  ctx.fill()
+  ctx.beginPath()
+  ctx.arc(CX, CY, 10, 0, Math.PI * 2)
+  ctx.strokeStyle = isHot ? 'rgba(255,140,60,0.70)' : 'rgba(100,140,220,0.55)'
+  ctx.lineWidth = 2
+  ctx.stroke()
+}
+
+// ─── Hex Pressure Arena ───────────────────────────────────────────────────────
+
+function drawHexPressureArena(ctx: CanvasRenderingContext2D, state: SimState): void {
+  const hexR = state.hexBaseRadius   // inscribed radius (mid-side)
+  const vertR = hexR / Math.cos(Math.PI / 6)  // vertex-to-center
+  const rot = state.hexRotation
+
+  // Compute current inset vertices
+  const hexVerts = computeInsetHexVerts(vertR, rot, state.hexSides)
+
+  // Dark background fill (hexagonal clip)
+  ctx.save()
+  ctx.beginPath()
+  hexPath(ctx, hexVerts)
+  const bgGrad = ctx.createRadialGradient(CX, CY, 0, CX, CY, vertR)
+  bgGrad.addColorStop(0.00, 'rgba(6,12,20,0.82)')
+  bgGrad.addColorStop(0.55, 'rgba(4,8,18,0.68)')
+  bgGrad.addColorStop(0.85, 'rgba(2,4,14,0.82)')
+  bgGrad.addColorStop(1.00, 'rgba(0,2,10,0.92)')
+  ctx.fillStyle = bgGrad
+  ctx.fill()
+  ctx.restore()
+
+  // Interior detail — hex-aligned guide rings
+  ctx.save()
+  ctx.beginPath()
+  hexPath(ctx, hexVerts)
+  ctx.clip()
+  drawHexInteriorDetail(ctx, hexVerts, state)
+  ctx.restore()
+
+  // Draw each side with bevel
+  for (let i = 0; i < 6; i++) {
+    drawHexSide(ctx, hexVerts, state.hexSides, i, state)
+  }
+
+  // Premium hex frame — multi-layer bevel
+  drawHexFrame(ctx, hexVerts, state)
+}
+
+function computeInsetHexVerts(
+  vertR: number,
+  rot: number,
+  sides: HexSide[]
+): Array<{x:number;y:number}> {
+  const outer: Array<{x:number;y:number}> = []
+  for (let i = 0; i < 6; i++) {
+    const a = rot + (i / 6) * Math.PI * 2
+    outer.push({ x: CX + Math.cos(a) * vertR, y: CY + Math.sin(a) * vertR })
+  }
+
+  // Apply per-vertex inset (average of adjacent sides)
+  const result: Array<{x:number;y:number}> = []
+  for (let i = 0; i < 6; i++) {
+    const insetA = sides[(i + 5) % 6]!.inset
+    const insetB = sides[i]!.inset
+    const avgInset = (insetA + insetB) * 0.5
+
+    const vx = outer[i]!.x - CX
+    const vy = outer[i]!.y - CY
+    const vLen = Math.sqrt(vx * vx + vy * vy)
+    const nx = vLen > 0 ? -vx / vLen : 0
+    const ny = vLen > 0 ? -vy / vLen : 0
+
+    result.push({
+      x: outer[i]!.x + nx * avgInset,
+      y: outer[i]!.y + ny * avgInset,
+    })
+  }
+  return result
+}
+
+function hexPath(ctx: CanvasRenderingContext2D, verts: Array<{x:number;y:number}>): void {
+  ctx.moveTo(verts[0]!.x, verts[0]!.y)
+  for (let i = 1; i < 6; i++) ctx.lineTo(verts[i]!.x, verts[i]!.y)
+  ctx.closePath()
+}
+
+function drawHexInteriorDetail(
+  ctx: CanvasRenderingContext2D,
+  verts: Array<{x:number;y:number}>,
+  state: SimState
+): void {
+  // Two inner guide hexagons at 70% and 40% scale
+  for (const scale of [0.70, 0.40]) {
+    ctx.beginPath()
+    ctx.moveTo(CX + (verts[0]!.x - CX) * scale, CY + (verts[0]!.y - CY) * scale)
+    for (let i = 1; i < 6; i++) {
+      ctx.lineTo(CX + (verts[i]!.x - CX) * scale, CY + (verts[i]!.y - CY) * scale)
+    }
+    ctx.closePath()
+    ctx.strokeStyle = 'rgba(80,110,170,0.07)'
+    ctx.lineWidth = 1
+    ctx.stroke()
+  }
+
+  // Radial spokes
+  for (let i = 0; i < 6; i++) {
+    ctx.beginPath()
+    const vx = (verts[i]!.x - CX) * 0.15
+    const vy = (verts[i]!.y - CY) * 0.15
+    ctx.moveTo(CX + vx, CY + vy)
+    ctx.lineTo(CX + (verts[i]!.x - CX) * 0.62, CY + (verts[i]!.y - CY) * 0.62)
+    ctx.strokeStyle = 'rgba(60,90,150,0.035)'
+    ctx.lineWidth = 1
+    ctx.stroke()
+  }
+
+  // Center pip
+  ctx.beginPath()
+  ctx.arc(CX, CY, 3, 0, Math.PI * 2)
+  ctx.fillStyle = 'rgba(80,120,200,0.12)'
+  ctx.fill()
+  ctx.beginPath()
+  ctx.arc(CX, CY, 1.5, 0, Math.PI * 2)
+  ctx.fillStyle = 'rgba(120,170,255,0.20)'
+  ctx.fill()
+
+  void state
+}
+
+function drawHexSide(
+  ctx: CanvasRenderingContext2D,
+  verts: Array<{x:number;y:number}>,
+  sides: HexSide[],
+  i: number,
+  state: SimState
+): void {
+  const a = verts[i]!
+  const b = verts[(i + 1) % 6]!
+  const side = sides[i]!
+
+  const phase = state.phase
+  const isEsc  = phase === 'ESCALATION'
+  const isFinal = phase === 'FINAL'
+  const hasInset = side.inset > 2
+
+  // Danger side glow
+  if (side.isDanger) {
+    ctx.save()
+    ctx.beginPath()
+    ctx.moveTo(a.x, a.y)
+    ctx.lineTo(b.x, b.y)
+    ctx.strokeStyle = 'rgba(255,20,0,0.55)'
+    ctx.lineWidth = 28
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(a.x, a.y)
+    ctx.lineTo(b.x, b.y)
+    ctx.strokeStyle = 'rgba(255,80,0,0.80)'
+    ctx.lineWidth = 6
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  // Show inset pressure marker
+  if (hasInset && (isEsc || isFinal)) {
+    const midX = (a.x + b.x) * 0.5
+    const midY = (a.y + b.y) * 0.5
+    const inAlpha = Math.min(0.50, side.inset / 200)
+    ctx.beginPath()
+    ctx.arc(midX, midY, 6, 0, Math.PI * 2)
+    ctx.fillStyle = isFinal
+      ? `rgba(255,40,0,${inAlpha})`
+      : `rgba(255,120,0,${inAlpha * 0.7})`
+    ctx.fill()
+  }
+}
+
+function drawHexFrame(
+  ctx: CanvasRenderingContext2D,
+  verts: Array<{x:number;y:number}>,
+  state: SimState
+): void {
+  const phase = state.phase
+  const isFinal = phase === 'FINAL'
+  const isEsc   = phase === 'ESCALATION'
+
+  // Outer shadow halo (a slightly larger hex)
+  const scale = 1.055
+  ctx.beginPath()
+  for (let i = 0; i < 6; i++) {
+    const vx = CX + (verts[i]!.x - CX) * scale
+    const vy = CY + (verts[i]!.y - CY) * scale
+    if (i === 0) ctx.moveTo(vx, vy)
+    else ctx.lineTo(vx, vy)
+  }
+  ctx.closePath()
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)'
+  ctx.lineWidth = 18
+  ctx.stroke()
+
+  // Outer metallic frame
+  ctx.beginPath()
+  hexPath(ctx, verts)
+  ctx.strokeStyle = isFinal ? 'rgba(255,40,0,0.85)'
+                 : isEsc   ? 'rgba(255,100,0,0.75)'
+                 :            'rgba(70,100,155,0.80)'
+  ctx.lineWidth = isFinal ? 5 : isEsc ? 4 : 3.5
+  ctx.stroke()
+
+  // Inner bevel highlight
+  const innerScale = 0.982
+  ctx.beginPath()
+  for (let i = 0; i < 6; i++) {
+    const vx = CX + (verts[i]!.x - CX) * innerScale
+    const vy = CY + (verts[i]!.y - CY) * innerScale
+    if (i === 0) ctx.moveTo(vx, vy)
+    else ctx.lineTo(vx, vy)
+  }
+  ctx.closePath()
+  ctx.strokeStyle = isFinal ? 'rgba(255,120,60,0.55)'
+                 : isEsc   ? 'rgba(255,160,60,0.40)'
+                 :            'rgba(120,160,230,0.30)'
+  ctx.lineWidth = 1.5
+  ctx.stroke()
+
+  // UL specular arc highlight on one face
+  // Choose side 0 (top-right) for specular
+  const s0 = verts[0]!
+  const s1 = verts[1]!
+  ctx.beginPath()
+  ctx.moveTo(s0.x, s0.y)
+  ctx.lineTo(
+    s0.x + (s1.x - s0.x) * 0.45,
+    s0.y + (s1.y - s0.y) * 0.45
+  )
+  ctx.strokeStyle = 'rgba(180,210,255,0.25)'
+  ctx.lineWidth = 4
+  ctx.stroke()
+
+  // Corner tick marks on each vertex
+  for (let i = 0; i < 6; i++) {
+    const v = verts[i]!
+    const inx = CX + (v.x - CX) * 0.94
+    const iny = CY + (v.y - CY) * 0.94
+    ctx.beginPath()
+    ctx.arc(inx, iny, 3, 0, Math.PI * 2)
+    ctx.fillStyle = isFinal ? 'rgba(255,80,0,0.70)' : 'rgba(120,160,220,0.45)'
+    ctx.fill()
+  }
+
+  // Phase pressure glow outside frame
+  if (isFinal || isEsc) {
+    ctx.beginPath()
+    hexPath(ctx, verts)
+    ctx.strokeStyle = isFinal ? 'rgba(255,20,0,0.18)' : 'rgba(255,90,0,0.12)'
+    ctx.lineWidth = 24
+    ctx.stroke()
+  }
+}
+
+// ─── Funnel Drop Arena ────────────────────────────────────────────────────────
+
+function drawFunnelDropArena(ctx: CanvasRenderingContext2D, state: SimState): void {
+  const topY    = state.funnelTopY
+  const bottomY = state.funnelBottomY
+  const leftTopX  = state.funnelLeftTopX
+  const rightTopX = state.funnelRightTopX
+  const neckW   = state.funnelNeckWidth
+  const neckY   = state.funnelNeckY
+  const slopeY1 = -100
+
+  const phase = state.phase
+  const isEsc   = phase === 'ESCALATION'
+  const isFinal = phase === 'FINAL'
+
+  // ─── Build funnel path ────────────────────────────────────────────────────
+  // The funnel outline in canvas coordinates (add CX/CY offset)
+  const path = new Path2D()
+  path.moveTo(CX + leftTopX,       CY + topY)       // TL
+  path.lineTo(CX + rightTopX,      CY + topY)       // TR
+  path.lineTo(CX + rightTopX,      CY + slopeY1)    // upper-right vertical
+  path.lineTo(CX + neckW/2,        CY + neckY)      // right slope to neck
+  path.lineTo(CX + neckW/2,        CY + bottomY)    // right chute
+  path.lineTo(CX - neckW/2,        CY + bottomY)    // bottom
+  path.lineTo(CX - neckW/2,        CY + neckY)      // left chute
+  path.lineTo(CX + leftTopX + (rightTopX - leftTopX) + (state.funnelLeftSlope * (neckY - slopeY1)),  // left slope
+              CY + neckY)   // just use -neckW/2 approximation
+  // Rebuild properly
+  const path2 = new Path2D()
+  const lx1 = CX + leftTopX
+  const lx2 = CX + state.funnelLeftSlope * (neckY - slopeY1) + leftTopX
+  const rx1 = CX + rightTopX
+  const rx2 = CX + state.funnelRightSlope * (neckY - slopeY1) + rightTopX
+  path2.moveTo(lx1,         CY + topY)
+  path2.lineTo(rx1,         CY + topY)
+  path2.lineTo(rx1,         CY + slopeY1)
+  path2.lineTo(rx2,         CY + neckY)
+  path2.lineTo(CX + neckW/2,  CY + neckY)
+  path2.lineTo(CX + neckW/2,  CY + bottomY)
+  path2.lineTo(CX - neckW/2,  CY + bottomY)
+  path2.lineTo(CX - neckW/2,  CY + neckY)
+  path2.lineTo(lx2,         CY + neckY)
+  path2.lineTo(lx1,         CY + slopeY1)
+  path2.closePath()
+  void path
+
+  // Fill interior
+  ctx.save()
+  ctx.beginPath()
+  ctx.rect(CX + leftTopX - 5, CY + topY - 5, rightTopX - leftTopX + 10, bottomY - topY + 10)
+  ctx.clip()
+  const bgGrad = ctx.createLinearGradient(CX, CY + topY, CX, CY + bottomY)
+  bgGrad.addColorStop(0.00, 'rgba(8,10,22,0.88)')
+  bgGrad.addColorStop(0.40, 'rgba(5,8,20,0.70)')
+  bgGrad.addColorStop(0.70, 'rgba(4,6,18,0.80)')
+  bgGrad.addColorStop(1.00, isFinal ? 'rgba(40,4,4,0.90)' : 'rgba(2,4,16,0.92)')
+  ctx.fillStyle = bgGrad
+  ctx.fill(path2)
+  ctx.restore()
+
+  // Interior detail — horizontal guide lines
+  drawFunnelInteriorDetail(ctx, state)
+
+  // Draw deflectors
+  for (let i = 0; i < state.funnelDeflectors.length; i++) {
+    const d = state.funnelDeflectors[i]
+    if (!d || !d.active) continue
+    drawFunnelDeflector(ctx, d, state)
+  }
+
+  // Funnel structural walls
+  drawFunnelWalls(ctx, state, lx1, rx1, lx2, rx2, slopeY1, path2)
+
+  // Bottom chute danger flash
+  if ((isEsc || isFinal) && state.funnelChuteDanger) {
+    const flash = 0.5 + 0.5 * Math.sin(state.roundTick * 0.20)
+    ctx.fillStyle = `rgba(255,20,0,${(0.08 + flash * 0.12).toFixed(3)})`
+    ctx.fillRect(CX - neckW/2, CY + neckY, neckW, bottomY - neckY)
+    ctx.strokeStyle = `rgba(255,40,0,${(0.60 + flash * 0.35).toFixed(3)})`
+    ctx.lineWidth = 3
+    ctx.strokeRect(CX - neckW/2, CY + neckY, neckW, bottomY - neckY)
+  }
+}
+
+function drawFunnelInteriorDetail(ctx: CanvasRenderingContext2D, state: SimState): void {
+  // Horizontal guide lines in upper chamber
+  const topY   = state.funnelTopY
+  const slopeY1 = -100
+  for (let y = topY + 80; y < slopeY1; y += 80) {
+    ctx.beginPath()
+    ctx.moveTo(CX + state.funnelLeftTopX + 10, CY + y)
+    ctx.lineTo(CX + state.funnelRightTopX - 10, CY + y)
+    ctx.strokeStyle = 'rgba(60,90,150,0.06)'
+    ctx.lineWidth = 1
+    ctx.stroke()
+  }
+  // Center line
+  ctx.beginPath()
+  ctx.moveTo(CX, CY + state.funnelTopY + 20)
+  ctx.lineTo(CX, CY + state.funnelNeckY - 20)
+  ctx.strokeStyle = 'rgba(60,90,150,0.04)'
+  ctx.lineWidth = 1
+  ctx.stroke()
+}
+
+function drawFunnelDeflector(
+  ctx: CanvasRenderingContext2D,
+  d: FunnelDeflector,
+  state: SimState
+): void {
+  const phase = state.phase
+  const isHot = phase === 'ESCALATION' || phase === 'FINAL'
+  const ca = Math.cos(d.angle)
+  const sa = Math.sin(d.angle)
+  const ax = CX + d.x - ca * d.length
+  const ay = CY + d.y - sa * d.length
+  const bx = CX + d.x + ca * d.length
+  const by = CY + d.y + sa * d.length
+
+  // Deflector body
+  ctx.beginPath()
+  ctx.moveTo(ax, ay)
+  ctx.lineTo(bx, by)
+  ctx.strokeStyle = isHot ? 'rgba(255,100,20,0.85)' : 'rgba(80,160,240,0.80)'
+  ctx.lineWidth = 8
+  ctx.lineCap = 'round'
+  ctx.stroke()
+
+  // Edge highlight
+  ctx.beginPath()
+  ctx.moveTo(ax, ay)
+  ctx.lineTo(bx, by)
+  ctx.strokeStyle = isHot ? 'rgba(255,180,80,0.45)' : 'rgba(160,210,255,0.35)'
+  ctx.lineWidth = 2
+  ctx.stroke()
+  ctx.lineCap = 'butt'
+
+  // Center pivot dot
+  ctx.beginPath()
+  ctx.arc(CX + d.x, CY + d.y, 4, 0, Math.PI * 2)
+  ctx.fillStyle = isHot ? 'rgba(255,140,0,0.70)' : 'rgba(100,180,255,0.60)'
+  ctx.fill()
+}
+
+function drawFunnelWalls(
+  ctx: CanvasRenderingContext2D,
+  state: SimState,
+  lx1: number, rx1: number, lx2: number, rx2: number,
+  slopeY1: number,
+  path2: Path2D
+): void {
+  const phase = state.phase
+  const isFinal = phase === 'FINAL'
+  const isEsc   = phase === 'ESCALATION'
+
+  const baseColor = isFinal ? 'rgba(255,40,0,0.85)'
+                 : isEsc   ? 'rgba(255,100,0,0.75)'
+                 :            'rgba(80,110,170,0.75)'
+  const creaseColor = isFinal ? 'rgba(255,120,60,0.55)'
+                   : isEsc   ? 'rgba(255,160,80,0.40)'
+                   :            'rgba(130,165,235,0.30)'
+
+  ctx.strokeStyle = baseColor
+  ctx.lineWidth = 3.5
+  ctx.stroke(path2)
+
+  ctx.strokeStyle = creaseColor
+  ctx.lineWidth = 1.5
+  ctx.stroke(path2)
+
+  // Outer shadow
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)'
+  ctx.lineWidth = 14
+
+  // Manually stroke outer wall segments for shadow
+  const topY    = state.funnelTopY
+  const neckY   = state.funnelNeckY
+  const bottomY = state.funnelBottomY
+  const neckW   = state.funnelNeckWidth
+
+  // Outer shadow only on exterior walls
+  ctx.beginPath()
+  ctx.moveTo(lx1 - 7, CY + topY)
+  ctx.lineTo(lx1 - 7, CY + slopeY1)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.moveTo(rx1 + 7, CY + topY)
+  ctx.lineTo(rx1 + 7, CY + slopeY1)
+  ctx.stroke()
+
+  // Phase pressure glow
+  if (isFinal || isEsc) {
+    ctx.strokeStyle = isFinal ? 'rgba(255,20,0,0.18)' : 'rgba(255,90,0,0.12)'
+    ctx.lineWidth = 22
+    ctx.stroke(path2)
+  }
+
+  // Side tick marks on left and right walls
+  const tickColor = 'rgba(100,140,200,0.20)'
+  for (let y = topY + 40; y < slopeY1 - 20; y += 40) {
+    ctx.beginPath()
+    ctx.moveTo(lx1 + 2, CY + y)
+    ctx.lineTo(lx1 + 10, CY + y)
+    ctx.strokeStyle = tickColor
+    ctx.lineWidth = 1
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(rx1 - 2, CY + y)
+    ctx.lineTo(rx1 - 10, CY + y)
+    ctx.strokeStyle = tickColor
+    ctx.lineWidth = 1
+    ctx.stroke()
+  }
+
+  // Chute tick marks
+  for (let y = neckY + 30; y < bottomY - 20; y += 30) {
+    ctx.beginPath()
+    ctx.moveTo(CX - neckW/2 + 2, CY + y)
+    ctx.lineTo(CX - neckW/2 + 8, CY + y)
+    ctx.strokeStyle = tickColor
+    ctx.lineWidth = 1
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(CX + neckW/2 - 2, CY + y)
+    ctx.lineTo(CX + neckW/2 - 8, CY + y)
+    ctx.strokeStyle = tickColor
+    ctx.lineWidth = 1
+    ctx.stroke()
+  }
+
+  void lx2; void rx2
 }
 
 function drawArenaInteriorDetail(ctx: CanvasRenderingContext2D, br: number): void {
@@ -911,23 +1579,28 @@ function drawHUD(ctx: CanvasRenderingContext2D, state: SimState): void {
   ctx.fillText(`ROUND ${state.round}`, 28, 58)
   ctx.fillText(state.currentRecipeName, 28, 82)
 
+  // Arena family name in HUD
+  ctx.font = '14px monospace'
+  ctx.fillStyle = getArenaHudColor(state.arenaFamily ?? 'CIRCLE_SURVIVAL')
+  ctx.fillText(state.arenaFamilyName ?? '', 28, 102)
+
   const sec = Math.floor(state.roundTick / 60)
   const min = Math.floor(sec / 60)
   const ss  = sec % 60
   const timeStr = `${min}:${ss.toString().padStart(2, '0')}`
   ctx.font = 'bold 22px monospace'
   ctx.fillStyle = '#ccddee'
-  ctx.fillText(timeStr, 28, 112)
+  ctx.fillText(timeStr, 28, 122)
 
   ctx.font = '13px monospace'
   ctx.fillStyle = 'rgba(140,160,180,0.65)'
-  ctx.fillText(`MATERIAL: ${state.roundMaterial}`, 28, 140)
+  ctx.fillText(`MATERIAL: ${state.roundMaterial}`, 28, 152)
 
   // Championship badge
   if (state.isChampionshipRound) {
     ctx.font = 'bold 14px monospace'
     ctx.fillStyle = 'rgba(255,215,0,0.80)'
-    ctx.fillText('CHAMPIONSHIP', 28, 158)
+    ctx.fillText('CHAMPIONSHIP', 28, 170)
   }
 
   // Recipe-specific HUD info
@@ -936,7 +1609,7 @@ function drawHUD(ctx: CanvasRenderingContext2D, state: SimState): void {
     ctx.font = 'bold 16px monospace'
     ctx.fillStyle = modeColor
     const changeInSec = Math.ceil(state.gravityCoreNextChangeIn / 60)
-    ctx.fillText(`CORE: ${state.gravityCoreMode}  (${changeInSec}s)`, 28, 180)
+    ctx.fillText(`CORE: ${state.gravityCoreMode}  (${changeInSec}s)`, 28, 192)
   }
 
   ctx.textAlign = 'right'
