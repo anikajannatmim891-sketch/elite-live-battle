@@ -1,8 +1,8 @@
 import { mulberry32, rngRange, type Rng } from './prng'
 import { reflectCircleBoundary, resolveCircleCircle } from './physics'
 import type {
-  Contestant, EliminationEffect, EventType, Phase,
-  PulseRing, SimState, TeamId, TrailPoint
+  CollisionEffect, Contestant, EliminationEffect, EventType, MaterialProfile,
+  Phase, PulseRing, SimState, TeamId, TrailPoint
 } from './types'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -21,8 +21,9 @@ const WANDER_AMP  = 0.06          // radians of random direction change per tick
 
 const TRAIL_MAX = 12              // trail points per contestant
 
-const EFFECT_POOL_SIZE  = 40      // max simultaneous elimination bursts
-const PULSE_POOL_SIZE   = 6       // max simultaneous pulse rings
+const EFFECT_POOL_SIZE    = 40      // max simultaneous elimination bursts
+const PULSE_POOL_SIZE     = 6       // max simultaneous pulse rings
+const COLLISION_POOL_SIZE = 24      // max simultaneous collision contact rings
 
 const MIN_BOUNDARY = 70
 
@@ -88,6 +89,15 @@ const PULSE_DURATION_T = 90
 // Milestone thresholds
 const MILESTONE_DURATION = 180  // 3s display
 
+// ─── Material profiles ordered for round cycling ─────────────────────────────
+
+const MATERIAL_CYCLE: MaterialProfile[] = ['POLISHED', 'METALLIC', 'PEARL', 'ENERGY']
+
+function materialForRound(round: number, override: MaterialProfile | null): MaterialProfile {
+  if (override !== null) return override
+  return MATERIAL_CYCLE[(round - 1) % MATERIAL_CYCLE.length]!
+}
+
 // ─── SimConfig ────────────────────────────────────────────────────────────────
 
 export interface SimConfig {
@@ -103,11 +113,19 @@ export class SimEngine {
   private pool: Contestant[]
   private effectPool: EliminationEffect[]
   private pulsePool: PulseRing[]
+  private collisionPool: CollisionEffect[]
 
   // Next-event scheduling
   private nextEventTick: number = 0
 
   readonly state: SimState
+
+  // Allow control panel to override material (null = AUTO)
+  setMaterialOverride(m: MaterialProfile | null): void {
+    this.state.materialOverride = m
+    // Apply immediately to current round
+    this.state.roundMaterial = materialForRound(this.state.round, m)
+  }
 
   constructor(initialSeed: number, config: SimConfig) {
     this.seed     = initialSeed >>> 0
@@ -140,6 +158,10 @@ export class SimEngine {
     for (let i = 0; i < PULSE_POOL_SIZE; i++) {
       this.pulsePool.push({ active: false, x: 0, y: 0, age: 0, maxAge: 0, color: '#ffffff' })
     }
+    this.collisionPool = []
+    for (let i = 0; i < COLLISION_POOL_SIZE; i++) {
+      this.collisionPool.push({ active: false, x: 0, y: 0, age: 0, maxAge: 0 })
+    }
 
     this.rng = mulberry32(this.seed)
     this.state = {
@@ -165,6 +187,9 @@ export class SimEngine {
       pressureActive: false,
       shrinkRate: 0,
       eliminationEffects: this.effectPool,
+      collisionEffects: this.collisionPool,
+      roundMaterial: 'POLISHED',
+      materialOverride: null,
       nextEventLabel: '',
       nextEventTicksRemaining: 0,
       shownFinal10: false,
@@ -205,8 +230,27 @@ export class SimEngine {
     }
   }
 
-  private spawnPulseRing(x: number, y: number, color: string): void {
-    for (let i = 0; i < this.pulsePool.length; i++) {
+  private spawnCollisionEffect(x: number, y: number): void {
+    for (let i = 0; i < this.collisionPool.length; i++) {
+      const e = this.collisionPool[i]
+      if (!e.active) {
+        e.active = true; e.x = x; e.y = y
+        e.age = 0; e.maxAge = this.t(14, 10)   // ~0.23s at 60 TPS
+        return
+      }
+    }
+    // pool full — reuse oldest
+    let oldest = this.collisionPool[0]
+    for (let i = 1; i < this.collisionPool.length; i++) {
+      if ((this.collisionPool[i]?.age ?? 0) > (oldest?.age ?? 0)) oldest = this.collisionPool[i]!
+    }
+    if (oldest) {
+      oldest.active = true; oldest.x = x; oldest.y = y
+      oldest.age = 0; oldest.maxAge = this.t(14, 10)
+    }
+  }
+
+  private spawnPulseRing(x: number, y: number, color: string): void {    for (let i = 0; i < this.pulsePool.length; i++) {
       const p = this.pulsePool[i]
       if (!p.active) {
         p.active = true; p.x = x; p.y = y; p.color = color
@@ -238,8 +282,9 @@ export class SimEngine {
     }
 
     // Reset effects
-    for (let i = 0; i < this.effectPool.length; i++) this.effectPool[i].active = false
-    for (let i = 0; i < this.pulsePool.length; i++)  this.pulsePool[i].active  = false
+    for (let i = 0; i < this.effectPool.length; i++)    this.effectPool[i].active    = false
+    for (let i = 0; i < this.pulsePool.length; i++)     this.pulsePool[i].active     = false
+    for (let i = 0; i < this.collisionPool.length; i++) this.collisionPool[i].active = false
 
     this.state.tick = 0
     this.state.roundTick = 0
@@ -258,6 +303,9 @@ export class SimEngine {
     this.state.safeSectorsActive  = false
     this.state.pressureActive     = false
     this.state.shrinkRate         = 0
+
+    // Select material for this round (deterministic, respects override)
+    this.state.roundMaterial = materialForRound(this.state.round, this.state.materialOverride)
 
     this.state.shownFinal10 = false
     this.state.shownFinal5  = false
@@ -633,11 +681,37 @@ export class SimEngine {
         if (this.pool[i].alive) reflectCircleBoundary(this.pool[i], boundary)
       }
     }
+
+    // Minimum relative speed (units/tick) to register a collision effect
+    // Avoids spawning effects on gentle touches / resting contacts
+    const COLLISION_THRESHOLD = 2.5
+
     for (let i = 0; i < TOTAL - 1; i++) {
       if (!this.pool[i].alive) continue
       for (let j = i + 1; j < TOTAL; j++) {
         if (!this.pool[j].alive) continue
-        resolveCircleCircle(this.pool[i], this.pool[j])
+        const a = this.pool[i]!
+        const b = this.pool[j]!
+
+        // Check for meaningful impact before resolution
+        const dx = b.x - a.x
+        const dy = b.y - a.y
+        const distSq = dx * dx + dy * dy
+        const minDist = a.radius + b.radius
+        if (distSq < minDist * minDist && distSq > 0) {
+          const dist = Math.sqrt(distSq)
+          const nx = dx / dist
+          const ny = dy / dist
+          const relVDotN = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny
+          // relVDotN > 0 means approaching; spawn effect if strong enough
+          if (relVDotN > COLLISION_THRESHOLD) {
+            const cx = (a.x + b.x) * 0.5
+            const cy = (a.y + b.y) * 0.5
+            this.spawnCollisionEffect(cx, cy)
+          }
+        }
+
+        resolveCircleCircle(a, b)
       }
     }
   }
@@ -733,6 +807,12 @@ export class SimEngine {
       if (!p.active) continue
       p.age++
       if (p.age >= p.maxAge) p.active = false
+    }
+    for (let i = 0; i < this.collisionPool.length; i++) {
+      const e = this.collisionPool[i]
+      if (!e.active) continue
+      e.age++
+      if (e.age >= e.maxAge) e.active = false
     }
   }
 }

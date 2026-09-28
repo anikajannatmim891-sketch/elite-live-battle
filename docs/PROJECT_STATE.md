@@ -120,6 +120,65 @@ vite.config.ts               — multi-page build + /live /control dev rewrite
 
 ---
 
-## Next: Pass 1C or later
+---
 
-- (TBD by user)
+## Pass 1C — Premium Sphere Materials and Effects (complete)
+
+**Completed:**
+
+### Material System (`src/client/live/material.ts`)
+- New `MaterialProfile` type: `POLISHED` | `METALLIC` | `PEARL` | `ENERGY`
+- Each profile baked into an offscreen `HTMLCanvasElement` per (material + team + radius bucket)
+- Cache keyed by `material:team:radiusBucket` — O(1) drawImage per sphere per frame after first use
+- No per-frame gradient allocation; 24 total cached surfaces (4 profiles × 6 teams × 1 radius)
+- Profiles:
+  - **POLISHED**: radial gradient UL→LR, rim light, crisp specular, micro secondary glint
+  - **METALLIC**: high-contrast sharper falloff, colored rim tint, narrow specular streak
+  - **PEARL**: soft near-white center, iridescent sheen layer, diffuse specular, warm rim
+  - **ENERGY**: dark outer/bright core, two concentric energy rings, colored rim, crisp specular
+
+### Round Material Selection
+- `roundMaterial` on `SimState` — set deterministically from `(round - 1) % 4`
+- Cycle: Round 1 = POLISHED, 2 = METALLIC, 3 = PEARL, 4 = ENERGY, then repeats
+- HUD displays `MATERIAL: <NAME>` in small muted text
+- `materialOverride: MaterialProfile | null` on SimState for control panel
+
+### Motion Trails
+- Replaced flat uniform-width trail with tapered trail
+- Each segment scales width from ~1.5px (tail) to ~r*0.55 (near head)
+- Alpha also scales 0 → 42% toward head
+- Team-colored, crisp, bounded to 12-point ring buffer (unchanged)
+
+### Collision Contact Effects
+- New `CollisionEffect` type and pre-allocated pool of 24 slots in sim
+- Detected in `collide()`: relative velocity along normal > 2.5 units/tick threshold
+- Visual: small expanding ring (4→18px) + brief inner flash for first 25% of life
+- Duration: ~0.23s (14 ticks); neutral bright tone (warm white)
+- No physics change; no blur; bounded pool
+
+### Elimination Effect Refinement
+- Phase-1 flash: brief scale bloom at sphere position (t < 0.15)
+- Primary expanding team-colored ring (6→48px)
+- Secondary soft white ring
+- 5 geometric outward streaks with taper
+- All effects fade cleanly; pool of 40 slots (unchanged)
+
+### Control Panel (`/control`)
+- Material selector: AUTO / POLISHED / METALLIC / PEARL / ENERGY
+- Uses `BroadcastChannel('elite-live-battle')` — no architectural disruption
+- `/live` listens on same channel, calls `sim.setMaterialOverride()`
+- AUTO = deterministic per-round cycle
+
+### Performance
+- Sphere cache: 24 offscreen canvases, each ~80×80px (~500 KB total, stable)
+- Collision pool: 24 slots, no runtime allocation
+- Elimination pool: 40 slots (unchanged)
+- Trail ring buffers: 12 pts per contestant (unchanged)
+- No blur, no shadowBlur, no image textures
+- Build: 30.05 kB / gzip 8.59 kB (was 22 kB / 6.7 kB)
+- Typecheck: clean
+
+**Known limitations:**
+- Offscreen sphere canvases are baked at first use; if radius changes mid-round the cache updates on next bucket boundary (no issue with current fixed radius=16)
+- Collision effect threshold (2.5 units/tick) may occasionally miss low-speed grazes — intentional
+- `BroadcastChannel` material override only works when /live and /control are open in the same browser (same origin); fine for development use

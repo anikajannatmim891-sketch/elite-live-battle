@@ -1,4 +1,5 @@
 import type { SimState, TeamId } from '../shared/types'
+import { drawSphere } from './material'
 
 const W  = 1920
 const H  = 1080
@@ -14,6 +15,16 @@ const TEAM_COLORS: Record<TeamId, string> = {
   VIOLET:  '#CC00FF',
   EMERALD: '#00FF88',
   MAGENTA: '#FF00AA',
+}
+
+// Pre-parsed RGBA components for hot-loop efficiency
+const TEAM_RGBA: Record<TeamId, [number,number,number]> = {
+  GOLD:    [255, 215,   0],
+  RED:     [255,  34,  51],
+  CYAN:    [  0, 255, 238],
+  VIOLET:  [204,   0, 255],
+  EMERALD: [  0, 255, 136],
+  MAGENTA: [255,   0, 170],
 }
 
 // Short team labels for scoreboard
@@ -44,7 +55,9 @@ export function render(ctx: CanvasRenderingContext2D, state: SimState): void {
 
   drawArena(ctx, state)
   drawPulseRings(ctx, state)
-  drawContestants(ctx, state)
+  drawTrails(ctx, state)
+  drawCollisionEffects(ctx, state)
+  drawContestantSpheres(ctx, state)
   drawEliminationEffects(ctx, state)
   drawHUD(ctx, state)
   drawScoreboard(ctx, state)
@@ -177,92 +190,94 @@ function drawPulseRings(ctx: CanvasRenderingContext2D, state: SimState): void {
     const alpha = (1 - t) * 0.7
     ctx.beginPath()
     ctx.arc(CX + p.x, CY + p.y, r, 0, Math.PI * 2)
-    ctx.strokeStyle = p.color.replace(')', `,${alpha.toFixed(2)})`).replace('rgb(', 'rgba(')
-      .replace('#00ddff', `rgba(0,221,255,${alpha.toFixed(2)})`)
     ctx.strokeStyle = `rgba(0,221,255,${alpha.toFixed(2)})`
     ctx.lineWidth = 3 * (1 - t * 0.5)
     ctx.stroke()
   }
 }
 
-// ─── Contestants ─────────────────────────────────────────────────────────────
+// ─── Motion trails ────────────────────────────────────────────────────────────
 
-function drawContestants(ctx: CanvasRenderingContext2D, state: SimState): void {
-  // Draw trails first (behind bodies)
+function drawTrails(ctx: CanvasRenderingContext2D, state: SimState): void {
   for (let i = 0; i < state.contestants.length; i++) {
     const c = state.contestants[i]
     if (!c.alive || c.trailLen < 2) continue
-    drawTrail(ctx, c, TEAM_COLORS[c.team])
-  }
-
-  // Draw bodies
-  for (let i = 0; i < state.contestants.length; i++) {
-    const c = state.contestants[i]
-    if (!c.alive) continue
-    drawContestantBody(ctx, c, TEAM_COLORS[c.team])
+    drawTrail(ctx, c, c.team)
   }
 }
 
 function drawTrail(
   ctx: CanvasRenderingContext2D,
-  c: { trail: Array<{ x: number; y: number }>; trailHead: number; trailLen: number },
-  color: string
+  c: { trail: Array<{ x: number; y: number }>; trailHead: number; trailLen: number; radius: number },
+  team: TeamId
 ): void {
   const len = c.trailLen
   if (len < 2) return
 
-  ctx.lineWidth = 2
+  const [r, g, b] = TEAM_RGBA[team]
   ctx.lineCap = 'round'
 
+  // Tapered trail: each segment uses decreasing lineWidth toward tail
+  // The head (most recent) is index (trailHead - 1), tail is (trailHead - len)
   for (let k = 0; k < len - 1; k++) {
     const idx0 = (c.trailHead - len + k + TRAIL_MAX * 100) % TRAIL_MAX
     const idx1 = (idx0 + 1) % TRAIL_MAX
     const pt0 = c.trail[idx0]
     const pt1 = c.trail[idx1]
     if (!pt0 || !pt1) continue
-    const alpha = ((k / len) * 0.35).toFixed(2)
+
+    // k=0 is tail (oldest), k=len-2 is near head (newest)
+    const ageFrac = k / (len - 1)          // 0 = tail, 1 = near-head
+    const alpha = ageFrac * 0.42            // tail transparent, head 42% alpha
+    const width = 1.5 + ageFrac * (c.radius * 0.55)  // taper from thin to wider
+
     ctx.beginPath()
     ctx.moveTo(CX + pt0.x, CY + pt0.y)
     ctx.lineTo(CX + pt1.x, CY + pt1.y)
-    // Inline color parsing: convert hex to rgba
-    ctx.strokeStyle = hexToRgba(color, parseFloat(alpha))
+    ctx.strokeStyle = `rgba(${r},${g},${b},${alpha.toFixed(3)})`
+    ctx.lineWidth = width
     ctx.stroke()
   }
 }
 
-function drawContestantBody(
-  ctx: CanvasRenderingContext2D,
-  c: { x: number; y: number; radius: number },
-  color: string
-): void {
-  const r = c.radius
-  const cx = CX + c.x
-  const cy = CY + c.y
+// ─── Contestants — premium pseudo-3D spheres ──────────────────────────────────
 
-  // Outer crisp outline
-  ctx.beginPath()
-  ctx.arc(cx, cy, r + 2, 0, Math.PI * 2)
-  ctx.fillStyle = 'rgba(0,0,0,0.55)'
-  ctx.fill()
+function drawContestantSpheres(ctx: CanvasRenderingContext2D, state: SimState): void {
+  const material = state.roundMaterial
+  for (let i = 0; i < state.contestants.length; i++) {
+    const c = state.contestants[i]
+    if (!c.alive) continue
+    drawSphere(ctx, CX + c.x, CY + c.y, c.radius, material, c.team)
+  }
+}
 
-  // Team-color body
-  ctx.beginPath()
-  ctx.arc(cx, cy, r, 0, Math.PI * 2)
-  ctx.fillStyle = color
-  ctx.fill()
+// ─── Collision contact effects ────────────────────────────────────────────────
 
-  // Crisp white outline
-  ctx.beginPath()
-  ctx.arc(cx, cy, r, 0, Math.PI * 2)
-  ctx.strokeStyle = 'rgba(255,255,255,0.7)'
-  ctx.lineWidth = 1.5
-  ctx.stroke()
+function drawCollisionEffects(ctx: CanvasRenderingContext2D, state: SimState): void {
+  for (let i = 0; i < state.collisionEffects.length; i++) {
+    const e = state.collisionEffects[i]
+    if (!e.active) continue
 
-  // Inner highlight (top-left arc)
-  ctx.beginPath()
-  ctx.arc(cx - r * 0.22, cy - r * 0.22, r * 0.38, 0, Math.PI * 2)
-  ctx.fillStyle = 'rgba(255,255,255,0.22)'
-  ctx.fill()
+    const t = e.age / e.maxAge          // 0 → 1
+    const r = 4 + t * 14               // small expanding ring
+    const alpha = (1 - t) * 0.75
+
+    // Crisp neutral bright ring
+    ctx.beginPath()
+    ctx.arc(CX + e.x, CY + e.y, r, 0, Math.PI * 2)
+    ctx.strokeStyle = `rgba(255,240,180,${alpha.toFixed(3)})`
+    ctx.lineWidth = 1.5 * (1 - t * 0.5)
+    ctx.stroke()
+
+    // Tiny inner flash at very start
+    if (t < 0.25) {
+      const innerAlpha = (1 - t / 0.25) * 0.50
+      ctx.beginPath()
+      ctx.arc(CX + e.x, CY + e.y, r * 0.4, 0, Math.PI * 2)
+      ctx.fillStyle = `rgba(255,255,255,${innerAlpha.toFixed(3)})`
+      ctx.fill()
+    }
+  }
 }
 
 // ─── Elimination effects ──────────────────────────────────────────────────────
@@ -273,30 +288,56 @@ function drawEliminationEffects(ctx: CanvasRenderingContext2D, state: SimState):
     if (!e.active) continue
 
     const t  = e.age / e.maxAge         // 0→1
-    const r  = 8 + t * 32               // expanding ring
     const color = TEAM_COLORS[e.team]
+    const [r, g, b] = TEAM_RGBA[e.team]
 
-    // Expanding ring
-    ctx.beginPath()
-    ctx.arc(CX + e.x, CY + e.y, r, 0, Math.PI * 2)
-    ctx.strokeStyle = hexToRgba(color, 1 - t)
-    ctx.lineWidth = 3 * (1 - t * 0.5)
-    ctx.stroke()
-
-    // Short outward streaks
-    const streakCount = 5
-    for (let k = 0; k < streakCount; k++) {
-      const a  = (k / streakCount) * Math.PI * 2 + t * 0.8
-      const r1 = r * 0.4
-      const r2 = r * 0.9 + t * 12
+    // Phase 1 (t < 0.15): brief scale flash on the sphere position
+    if (t < 0.15) {
+      const flashScale = 1 + (t / 0.15) * 0.4
+      const flashAlpha = (1 - t / 0.15) * 0.55
+      const flashR = 16 * flashScale
       ctx.beginPath()
-      ctx.moveTo(CX + e.x + Math.cos(a) * r1, CY + e.y + Math.sin(a) * r1)
-      ctx.lineTo(CX + e.x + Math.cos(a) * r2, CY + e.y + Math.sin(a) * r2)
-      ctx.strokeStyle = hexToRgba(color, (1 - t) * 0.8)
-      ctx.lineWidth = 2
-      ctx.stroke()
+      ctx.arc(CX + e.x, CY + e.y, flashR, 0, Math.PI * 2)
+      ctx.fillStyle = `rgba(${r},${g},${b},${flashAlpha.toFixed(3)})`
+      ctx.fill()
     }
 
+    // Expanding team-colored ring
+    const ringR  = 6 + t * 42
+    const ringAlpha = (1 - t) * 0.95
+    ctx.beginPath()
+    ctx.arc(CX + e.x, CY + e.y, ringR, 0, Math.PI * 2)
+    ctx.strokeStyle = hexToRgba(color, ringAlpha)
+    ctx.lineWidth = 2.5 * (1 - t * 0.6)
+    ctx.stroke()
+
+    // Second outer ring (slightly delayed / softer)
+    const ring2R = 4 + t * 28
+    const ring2Alpha = Math.max(0, (0.6 - t) * 0.60)
+    ctx.beginPath()
+    ctx.arc(CX + e.x, CY + e.y, ring2R, 0, Math.PI * 2)
+    ctx.strokeStyle = `rgba(255,255,255,${ring2Alpha.toFixed(3)})`
+    ctx.lineWidth = 1.0
+    ctx.stroke()
+
+    // 4-6 short geometric streaks
+    const streakCount = 5
+    const streakAlpha = (1 - t) * 0.85
+    for (let k = 0; k < streakCount; k++) {
+      const a   = (k / streakCount) * Math.PI * 2 + t * 1.2
+      const r1  = ringR * 0.30
+      const r2  = ringR * 0.85 + t * 10
+      const sx1 = CX + e.x + Math.cos(a) * r1
+      const sy1 = CY + e.y + Math.sin(a) * r1
+      const sx2 = CX + e.x + Math.cos(a) * r2
+      const sy2 = CY + e.y + Math.sin(a) * r2
+      ctx.beginPath()
+      ctx.moveTo(sx1, sy1)
+      ctx.lineTo(sx2, sy2)
+      ctx.strokeStyle = hexToRgba(color, streakAlpha)
+      ctx.lineWidth = 1.8 * (1 - t * 0.7)
+      ctx.stroke()
+    }
   }
 }
 
@@ -325,6 +366,11 @@ function drawHUD(ctx: CanvasRenderingContext2D, state: SimState): void {
   ctx.font = 'bold 22px monospace'
   ctx.fillStyle = '#ccddee'
   ctx.fillText(timeStr, 28, 112)
+
+  // Material label — subtle, small
+  ctx.font = '13px monospace'
+  ctx.fillStyle = 'rgba(140,160,180,0.65)'
+  ctx.fillText(`MATERIAL: ${state.roundMaterial}`, 28, 140)
 
   // Phase indicator — top right
   ctx.textAlign = 'right'
@@ -437,7 +483,7 @@ function drawEventIndicator(ctx: CanvasRenderingContext2D, state: SimState): voi
       ctx.textBaseline = 'top'
       ctx.font = '15px monospace'
       ctx.fillStyle = 'rgba(200,200,200,0.5)'
-      ctx.fillText(`ends in ${sec}s`, 28, 142)
+      ctx.fillText(`ends in ${sec}s`, 28, 162)
     }
     return
   }
@@ -452,7 +498,7 @@ function drawEventIndicator(ctx: CanvasRenderingContext2D, state: SimState): voi
       ctx.font = sec <= 5 ? 'bold 18px monospace' : '15px monospace'
       const baseLabel = state.nextEventLabel.replace(/ \d+$/, '')
       ctx.fillStyle = `rgba(255,200,80,${alpha})`
-      ctx.fillText(`${baseLabel} ${sec}`, 28, 142)
+      ctx.fillText(`${baseLabel} ${sec}`, 28, 162)
     }
   }
 
@@ -465,7 +511,7 @@ function drawEventIndicator(ctx: CanvasRenderingContext2D, state: SimState): voi
       : 'rgba(255,120,0,0.6)'
     ctx.fillText(
       state.phase === 'FINAL' ? 'PRESSURE CRITICAL' : 'PRESSURE RISING',
-      28, 142
+      28, 162
     )
   }
 }

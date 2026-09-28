@@ -1,5 +1,8 @@
 export type TeamId = 'GOLD' | 'RED' | 'CYAN' | 'VIOLET' | 'EMERALD' | 'MAGENTA'
 
+// Material profile for the current round's sphere rendering
+export type MaterialProfile = 'POLISHED' | 'METALLIC' | 'PEARL' | 'ENERGY'
+
 // Round phases — deterministic ordering
 export type Phase =
   | 'PREPARE'
@@ -38,6 +41,15 @@ export interface Contestant {
   trail: TrailPoint[]
   trailHead: number  // index of next write position
   trailLen: number   // how many valid entries (up to TRAIL_MAX)
+}
+
+// Collision contact effect — pre-allocated pool
+export interface CollisionEffect {
+  active: boolean
+  x: number
+  y: number
+  age: number
+  maxAge: number
 }
 
 // Elimination burst effect — pre-allocated pool
@@ -105,6 +117,14 @@ export interface SimState {
 
   // Pre-allocated effects pool
   eliminationEffects: EliminationEffect[]
+
+  // Pre-allocated collision effect pool
+  collisionEffects: CollisionEffect[]
+
+  // Current round material profile
+  roundMaterial: MaterialProfile
+  // Override from control panel (null = AUTO / deterministic)
+  materialOverride: MaterialProfile | null
 
   // Next event hint for HUD
   nextEventLabel: string

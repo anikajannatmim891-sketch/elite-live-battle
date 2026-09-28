@@ -1,5 +1,6 @@
 import { SimEngine } from '../shared/sim'
 import { render } from './renderer'
+import type { MaterialProfile } from '../shared/types'
 
 const LOGICAL_W = 1920
 const LOGICAL_H = 1080
@@ -27,6 +28,15 @@ function init(): void {
   const initialSeed = Date.now() >>> 0
 
   const sim = new SimEngine(initialSeed, { testMode })
+
+  // Listen for material override from /control page
+  const bc = new BroadcastChannel('elite-live-battle')
+  bc.addEventListener('message', (ev) => {
+    const data = ev.data as { type: string; value: MaterialProfile | null }
+    if (data.type === 'material') {
+      sim.setMaterialOverride(data.value)
+    }
+  })
 
   let lastTs = 0
   let accumMs = 0

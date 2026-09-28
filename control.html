@@ -13,14 +13,34 @@
     .section { border: 1px solid #2a2a2a; padding: 16px; margin-bottom: 16px; }
     .section h2 { font-size: 0.85rem; color: #777; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
     #status-output { font-size: 0.9rem; color: #bbb; }
+    .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    .mat-btn {
+      background: #1a1a1a; border: 1px solid #333; color: #aaa;
+      font-family: monospace; font-size: 0.85rem; padding: 6px 14px;
+      cursor: pointer; letter-spacing: 1px; transition: border-color 0.15s;
+    }
+    .mat-btn:hover { border-color: #666; color: #ddd; }
+    .mat-btn.active { border-color: #39ff14; color: #39ff14; }
+    .note { font-size: 0.75rem; color: #444; margin-top: 8px; }
   </style>
 </head>
 <body>
   <h1>ELITE LIVE BATTLE ENGINE</h1>
-  <p class="sub">CONTROL PANEL — PASS 0</p>
+  <p class="sub">CONTROL PANEL — PASS 1C</p>
   <div class="section">
     <h2>Status</h2>
     <div id="status-output">initializing...</div>
+  </div>
+  <div class="section">
+    <h2>Material Override</h2>
+    <div class="btn-row">
+      <button class="mat-btn active" data-material="AUTO">AUTO</button>
+      <button class="mat-btn" data-material="POLISHED">POLISHED</button>
+      <button class="mat-btn" data-material="METALLIC">METALLIC</button>
+      <button class="mat-btn" data-material="PEARL">PEARL</button>
+      <button class="mat-btn" data-material="ENERGY">ENERGY</button>
+    </div>
+    <p class="note">AUTO = deterministic per-round cycle. Manual = development/testing only.</p>
   </div>
   <script type="module" src="/src/client/control/main.ts"></script>
 </body>
